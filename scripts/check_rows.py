@@ -14,7 +14,9 @@ ALLOWED = {
     "model", "input_tokens", "output_tokens", "route", "timestamp", "cached_input_tokens", "cache_write_tokens",
     "cache_write_1h_tokens", "ttft_ms", "latency_ms", "success", "streamed", "task_id", "session_id",
     "prefix_hash", "prefix_tokens", "synthetic", "usage_missing", "stateless", "prefix_hash_kind", "logged_cost_usd",
+    "tools_defined", "tool_schema_tokens", "tool_calls",
 }
+COUNT_COLS = ("tools_defined", "tool_schema_tokens", "tool_calls")
 MAX_STR = 96
 TOKEN_COLS = ("input_tokens", "output_tokens", "cached_input_tokens", "cache_write_tokens", "cache_write_1h_tokens")
 BOOL_COLS = ("usage_missing", "stateless")
@@ -42,6 +44,9 @@ def row_problems(row):
         out.append("column 'prefix_hash_kind' must be content or structural")
     if "logged_cost_usd" in row and row["logged_cost_usd"] is not None and not _is_num(row["logged_cost_usd"]):
         out.append("column 'logged_cost_usd' must be a number")
+    for k in COUNT_COLS:
+        if k in row and row[k] is not None and (not _is_num(row[k]) or row[k] < 0):
+            out.append("column %r must be a count (a number, 0 or more)" % k)
     if _truthy(row.get("usage_missing")):
         if any(row.get(c) not in (None, "") for c in TOKEN_COLS):
             out.append("row is usage_missing but carries token counts; drop the flag or the counts")

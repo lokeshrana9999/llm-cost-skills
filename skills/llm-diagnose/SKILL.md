@@ -12,13 +12,20 @@ Needs `work/<repo>/rows.jsonl` (from `llm-capture`) and `work/<repo>/routes.json
 1. Detect which coding agent you are: Claude Code, or Codex (or any other coding agent). Read only `delegation/claude.md` or `delegation/codex.md` in this pack.
 2. `<pack>` = the folder that holds `scripts/calc.py`. Write only under `<pack>/work/<repo>/` (the one exception: the short-lived phrases file of the privacy check, in the OS temp folder). Never write into the target repo.
 
-## 1. Run the calculator
+## 1. Ask the provider scope, then run the calculator
+
+Ask the user once, before running calc, in these words: "Stay with your current AI providers, or open to cheaper options from other providers?" Do not ask again. If there is no answer, use `stay`.
+
+- `stay` (default): every action stays inside the providers in the data (caching, trimming, caps, batching, failed-call fixes, a smaller model at the same provider).
+- `open`: the report also gets a separate "Other providers" section (HYPOTHESIS, never in the totals).
+
+Pass the answer as `--scope`:
 
 ```
-python <pack>/scripts/calc.py work/<repo>/rows.jsonl --routes work/<repo>/routes.json -o work/<repo>/report.md
+python <pack>/scripts/calc.py work/<repo>/rows.jsonl --routes work/<repo>/routes.json --scope stay -o work/<repo>/report.md
 ```
 
-`--routes` adds the report's "Scan-only findings" section (usage gaps and routes with no rows, UNMEASURED, no dollars). Other optional flags: `--ttft-budget-ms N` (ask the user for a target if they have one), `--window-days N` (if rows have no timestamps), `--input-excludes-cached` (if the adapter left cache counts out of `input_tokens`), `--label "<text>"`, `--prices <file>`, `--view auto|latency|backoffice|both`. Use `python`, not `python3`. If it exits with an error, fix the input (the message names the column); do not work around it.
+The headline and the action table are the same under both scopes. `--routes` adds the report's "Scan-only findings" section (usage gaps and routes with no rows, UNMEASURED, no dollars). Other optional flags: `--ttft-budget-ms N` (ask the user for a target if they have one), `--window-days N` (if rows have no timestamps), `--input-excludes-cached` (if the adapter left cache counts out of `input_tokens`), `--label "<text>"`, `--prices <file>`, `--view auto|latency|backoffice|both`. Use `python`, not `python3`. If it exits with an error, fix the input (the message names the column); do not work around it.
 
 Read the top of `report.md` first:
 
@@ -32,7 +39,9 @@ Read the top of `report.md` first:
 
 Never compute numbers by hand. Every number you state is copied from `report.md`.
 
-Write `work/<repo>/diagnosis.md` with a short section "Where in code". Take the top findings from the report's action table (up to five), the report's "Measured findings with no savings dollar" section when it has rows (copied as worded, no savings dollar), and the report's "Cache in use (MEASURED)" section when it has rows: list its largest route and model with the cache-read, 5-minute-write and 1-hour-write dollars, the write-versus-read ratio and the writes-after-the-first-call count, copied from the report, with no savings dollar. For each finding:
+Write `work/<repo>/diagnosis.md`. Start it with one line, "Provider scope: stay" or "Provider scope: open (the user's answer, or the default)". Then a short section "Where in code". Take the top findings from the report's action table (up to five), the report's "Measured findings with no savings dollar" section when it has rows (copied as worded, no savings dollar), and the report's "Cache in use (MEASURED)" section when it has rows: list its largest route and model with the cache-read, 5-minute-write and 1-hour-write dollars, the write-versus-read ratio and the writes-after-the-first-call count, copied from the report, with no savings dollar. Also list, copied as worded and joined to routes.json the same way, with no dollar added to any total: the report's "Unused tool schemas" rows (MEASURED dollars, action HYPOTHESIS; routes.json `tools` says where the definitions are built), its "Spirals" rows (MEASURED; "not enough tasks" copied as is), and, only when the scope is open, the "Other providers" section (HYPOTHESIS: candidate, list-price figure, switching cost and eval exactly as written; say the figures are outside the headline). Any row the report marks "low evidence" stays marked in `diagnosis.md`; say it is a lead, not a result.
+
+For each finding:
 
 - the finding, as the report words it, with its dollar range and label (MEASURED / MECHANICAL / HYPOTHESIS) copied verbatim;
 - the route id(s) from the report, joined to `routes.json`: `file:function`, plus the facts from routes.json that explain it (for example `streaming: false`, `cache_markers: implicit`, `stateless`, `max_tokens: null`, `retries`, `user_waits`);

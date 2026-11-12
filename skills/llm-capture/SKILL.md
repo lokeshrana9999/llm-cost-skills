@@ -44,6 +44,9 @@ Write a small stdlib-only script `work/<repo>/adapter.py` that reads the app's l
 | `usage_missing` | true | the call happened but the log has no token usage (below) |
 | `stateless` | true | the route is stateless in routes.json (each call stands alone) |
 | `logged_cost_usd` | number | optional; the cost the app logged for this call, as logged |
+| `tools_defined` | number | optional; how many tool or function definitions the request carried |
+| `tool_schema_tokens` | number | optional; tokens the tool definitions take in the request, when the log holds that size |
+| `tool_calls` | number | optional; how many tool calls the response made (`0` is meaningful: the schema was sent and no tool was called) |
 
 Unit rules: times in ms (convert seconds x 1000), tokens as counts (not thousands). If the log reports input, cache read and cache creation as separate numbers (the usual provider usage shape), add them into `input_tokens` in the adapter, or leave them separate and tell the user to run calc with `--input-excludes-cached`. Pick one and say which. If the log gives a total cache-creation number and a 1-hour part, put the 1-hour part in `cache_write_1h_tokens` and the rest in `cache_write_tokens`.
 
@@ -54,6 +57,7 @@ Never invent a value, with these allowed sources:
 - **No usage in the log.** If a call is logged but has no token usage (warm-up and keepalive calls, calls whose response was not saved), do not drop it. Emit a row with `usage_missing: true`, plus `route`, `model` if known, `timestamp` and `latency_ms` if present, and no token columns. calc counts these per route, leaves them out of spend and states that spend is a floor. Log lines for model calls that failed or were discarded, with no usage, are rows too: emit them as `usage_missing: true` with `success: false`.
 - **Stateless routes.** For routes with `stateless: true` in routes.json, emit `stateless: true` and omit `session_id`.
 - **prefix_hash.** Hash the stable prefix text in the adapter when the logs hold it. If the logs hold no prompt text, emit a structural hash instead (first 12 hex chars of sha256 of route + model + the process or worker generation id), set `prefix_hash_kind` to `structural`, and say so in the adapter header comment. calc then states in the report that the hash is structural and the caching figure assumes the prefix is stable. If there is no process or worker id either, omit `prefix_hash`.
+- **Tool columns.** Emit `tools_defined`, `tool_schema_tokens` and `tool_calls` only when the logs carry them (the scan's note on tool fields says where). They are counts: never a tool name, a tool argument or a tool result. Do not estimate the schema size from the code; if only the count of tools is logged, emit `tools_defined` and leave out `tool_schema_tokens`. Emit `tool_calls: 0` only when the log shows the response had no tool call; if the log does not say, omit the column. Say in the adapter header comment where each came from.
 - **logged_cost_usd.** Copy it as logged. It may be a running total per process or session; calc prints a reconciliation line against the priced total and warns about that.
 
 Out of scope: non-LLM model calls (speech-to-text and the like). They are listed in routes.json with `kind: non_llm`; emit no rows for them.

@@ -42,6 +42,8 @@ One entry per call site. Route id = `relative/path.ext:function_name`; for a met
 | `retries` | count and where (SDK default, wrapper, loop), or `0` |
 | `user_waits` | true if a person is waiting on the answer (chat, voice, live UI); false for batch, background, cron; `"unknown"` if you cannot tell |
 | `decision_model` | true for gates, routers, classifiers, judges |
+| `decision_shaped` | `true` if the answer is a tiny verdict that feeds a code branch (an enum, a boolean, a label, a score) and the route runs per event or per item; `false` if the answer is free text or long structured output; `"unknown"` if you cannot tell. Record it for every route; calc also detects it from the logs (output p50 of 5 tokens or less on 50+ calls) |
+| `tools` | where tool or function definitions are built and sent (file:function, and how many are sent per call if the code shows it), or `null` if the route sends none. Facts only; the numbers come from the logs |
 | `live` | true; false if test-only; `"unknown"` if you cannot tell |
 | `stateless` | true if every call stands alone (a per-event gate or classifier that sends no earlier turns); false if a conversation or memo grows across calls; `"unknown"` |
 | `notes` | one short line, only facts you saw |
@@ -51,6 +53,8 @@ Use `null` (or `"unknown"` where the table allows it) when you cannot tell. Neve
 ## 3. Find the usage logs
 
 Where does the app already record usage (tokens, cost, latency, time to first token, success)? Look for log files, JSONL, CSV, SQLite or database tables, tracing and metrics calls, and provider usage fields saved from responses. For each, record the path or table, the format, the field NAMES (never values), whether any field holds prompt or answer text (`has_text_fields`), and which route ids it covers. Do not open log values beyond the first few lines needed to learn the field names; do not copy any text from them.
+
+Also note, by field NAME only, whether the logs record tool definitions or tool use per call (a count of tools sent, the size of the tool definitions in tokens, a count of tool calls in the response); `llm-capture` turns these into `tools_defined`, `tool_schema_tokens` and `tool_calls`. If the logs lack them, say so in `usage_gaps`.
 
 Also record `usage_gaps`: short plain notes (one line each, facts only) where calls happen but the logs carry no token usage or the logged numbers cannot be trusted as is. Examples: "warm-up calls on route X are logged with no usage", "logged cost is a running total per process", "route Y is not logged at all". Counts are welcome ("seen N times") when you read them from field names and counts only.
 
@@ -64,7 +68,7 @@ Also record `usage_gaps`: short plain notes (one line each, facts only) where ca
   "routes": [
     {"id": "path/file.py:Class.method", "kind": "cli", "provider": null, "model": "<string>", "model_source": null,
      "streaming": true, "cache_markers": "implicit", "max_tokens": null, "retries": 0,
-     "user_waits": true, "decision_model": false, "live": true, "stateless": false, "notes": ""},
+     "user_waits": true, "decision_model": false, "decision_shaped": false, "tools": null, "live": true, "stateless": false, "notes": ""},
     {"id": "path/stt.py:transcribe", "kind": "non_llm", "live": true, "notes": "speech-to-text, not priced"}
   ],
   "usage_logs": [

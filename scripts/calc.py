@@ -10,13 +10,17 @@ opaque prefix hash. Task and session ids are replaced by short sha256 hashes.
                    [--view auto|latency|backoffice|both]
                    [--ttft-budget-ms N] [--window-days N] [--label TEXT]
                    [--input-excludes-cached] [--routes routes.json]
+                   [--scope stay|open]
 
 Required columns: model, input_tokens, output_tokens (a row with usage_missing true
 needs none of them).
 Optional: timestamp, latency_ms, ttft_ms, cached_input_tokens, cache_write_tokens,
 cache_write_1h_tokens, route, task_id, session_id, success, streamed,
 prefix_hash, prefix_tokens, prefix_hash_kind (content|structural), usage_missing,
-stateless (no trimming or context-growth for the row's session), logged_cost_usd.
+stateless (no trimming or context-growth for the row's session), logged_cost_usd,
+tools_defined, tool_schema_tokens, tool_calls (the unused tool-schema finding).
+--scope: stay (default) keeps every action inside the providers in the export; open adds a separate
+"Other providers" section (HYPOTHESIS, never in the totals). The headline totals are the same for both.
 --routes: the scan's routes.json; adds the UNMEASURED scan-only findings section.
 input_tokens is assumed to include cached_input_tokens, cache_write_tokens and
 cache_write_1h_tokens (cache_write_tokens = 5-minute writes only). Pass
@@ -42,7 +46,18 @@ CONTEXT_MIN_CALLS = 3  # a session needs this many calls on a route to measure g
 LEAD_MIN_SHARE = 0.10  # cache writes lead the headline only above this share of spend (and when they outweigh reads)
 LEAD_SAVINGS_SHARE = 0.01  # the headline leads with a measured fact when no-output-change savings are below this share of spend
 CACHED_ROUTE_SHARE = 0.5   # a route whose calls show cache reads or writes at least this often already caches
-CUMULATIVE_MIN = 8     # logged_cost_usd needs this many values on a route before "looks cumulative" is judged
+TOOL_UNUSED_SHARE = 0.9    # unused tool schemas: share of a route's schema-carrying calls with no tool call
+TOOL_MIN_SESSIONS = 2      # ... seen in at least this many sessions
+SPIRAL_FACTOR = 2.5        # a task is a spiral candidate above this multiple of its route's median task (calls or tokens)
+SPIRAL_MIN_FAILED = 2      # ... and with at least this many failed calls
+SPIRAL_MIN_TASKS = 20      # a route needs this many tasks before spirals are judged
+LOW_EVIDENCE_SESSIONS = 3  # a finding resting on fewer sessions (when its calls carry session_id) is marked low evidence
+DECISION_MAX_OUT = 5       # decision-shaped route: output p50 at or under this many tokens ...
+DECISION_MIN_CALLS = 50    # ... and at least this many calls
+GATE_ESCALATE_SHARE = 0.10  # assumption A2: share of calls a decision-model gate sends on to the current model
+OPEN_MAX_CANDIDATES = 3    # other-provider candidates listed per route
+CLASS_LADDER = ("small", "mid", "frontier")   # prices.json 'class' order; 'decision' is outside the ladder
+CUMULATIVE_MIN = 8    # logged_cost_usd needs this many values on a route before "looks cumulative" is judged
 
 COLUMN_ALIASES = {
     "timestamp": ["timestamp", "time", "created_at", "ts"],
@@ -66,6 +81,9 @@ COLUMN_ALIASES = {
     "stateless": ["stateless"],
     "prefix_hash_kind": ["prefix_hash_kind"],
     "logged_cost_usd": ["logged_cost_usd"],
+    "tools_defined": ["tools_defined"],
+    "tool_schema_tokens": ["tool_schema_tokens"],
+    "tool_calls": ["tool_calls"],
 }
 REQUIRED = ["model", "input_tokens", "output_tokens"]
 
@@ -262,7 +280,7 @@ def read_raw(path):
 class Call(object):
     __slots__ = ("idx", "ts", "model", "route", "inp", "out", "cached", "lat", "ttft", "task",
                  "session", "ok", "phash", "ptoks", "streamed", "provider", "cw", "cw1",
-                 "stateless", "logged", "phash_kind")
+                 "stateless", "logged", "phash_kind", "tools_defined", "tool_schema", "tool_calls")
 
 
 def parse_rows(raw, bad_lines=0, input_excludes_cached=False):
@@ -334,6 +352,8 @@ def parse_rows(raw, bad_lines=0, input_excludes_cached=False):
         c.streamed = to_bool(g("streamed"))
         c.stateless = to_bool(g("stateless")) is True
         c.logged = to_num(g("logged_cost_usd"))
+        c.tools_defined, c.tool_schema, c.tool_calls = (to_num(g("tools_defined")), to_num(g("tool_schema_tokens")),
+                                                        to_num(g("tool_calls")))
         k = g("prefix_hash_kind")
         c.phash_kind = str(k).strip().lower() if k not in (None, "") else None
         rt = g("route")
@@ -422,6 +442,7 @@ class Acc(object):
         self.spend = 0.0
         self.by_route = defaultdict(float)
         self.lines = []
+        self.sess = set()                # session ids of the calls the step touched (evidence rule)
 
 
 def touch(acc, calls, i, before, after):
@@ -431,6 +452,25 @@ def touch(acc, calls, i, before, after):
     if d > 1e-12:
         acc.n += 1
         acc.spend += before
+        if calls[i].session is not None:
+            acc.sess.add(calls[i].session)
+
+
+def low_evidence(sessions):
+    """(is_low, n): a finding is low evidence when its calls carry session_id and span fewer than
+    LOW_EVIDENCE_SESSIONS distinct sessions. No session ids on its calls: sessions are unknown, not low."""
+    n = len(sessions)
+    return (0 < n < LOW_EVIDENCE_SESSIONS), n
+
+
+def evidence_note(sessions):
+    low, n = low_evidence(sessions)
+    return ", low evidence (%s)" % pl(n, "session") if low else ""
+
+
+def net_of_added_calls(gross, added):
+    """Savings after paying for the calls a finding adds (a gate, a judge): gross minus added, both in USD."""
+    return dict(gross=gross, added=added, net=gross - added)
 
 
 # ---------------------------------------------------------------- context
@@ -496,6 +536,8 @@ def build_ctx(parsed, prices, window_days=None):
     _groups(ctx)
     _candidates(ctx)
     _cache_measured(ctx)
+    _tool_schemas(ctx)
+    _spirals(ctx)
     return ctx
 
 
@@ -655,6 +697,272 @@ def _cache_measured(ctx):
     ctx.rewrite_findings = sorted(fr.values(), key=lambda f: (-f["usd"], -f["rewr"]))
     ctx.cache_lead = bool(rows) and ctx.spend > 0 and tot["writes"] / ctx.spend >= LEAD_MIN_SHARE and \
         (tot["read"] <= 0 or tot["writes"] > tot["read"])
+
+
+def _tool_schemas(ctx):
+    """Route-level finding: tool definitions sent on (nearly) every call and never invoked.
+    MEASURED dollars = schema tokens x calls x the rate the tokens were billed at; the action is a HYPOTHESIS."""
+    calls = ctx.calls
+    ctx.tool_cols = any(c.tool_schema is not None or c.tool_calls is not None for c in calls)
+    ctx.tool_findings, ctx.tool_checked = [], 0
+    for route, idxs in ctx.by_route.items():
+        elig = [i for i in idxs if (calls[i].tool_schema or 0) > 0 and calls[i].tool_calls is not None]
+        if not elig:
+            continue
+        ctx.tool_checked += 1
+        unused = [i for i in elig if calls[i].tool_calls == 0]
+        sess = set(calls[i].session for i in unused if calls[i].session is not None)
+        if len(unused) < TOOL_UNUSED_SHARE * len(elig):
+            continue
+        if sess and len(sess) < TOOL_MIN_SESSIONS:
+            continue
+        usd_, n_cached = 0.0, 0
+        for i in unused:
+            s = ctx.base[i]
+            toks = min(calls[i].tool_schema, calls[i].inp)
+            if calls[i].cached >= toks:                  # the cache read covers the schema: billed at the cached rate
+                usd_ += toks * s.rc / 1e6
+                n_cached += 1
+            else:                                        # otherwise assume the uncached input rate
+                usd_ += toks * s.rin / 1e6
+        defined = [calls[i].tools_defined for i in elig if calls[i].tools_defined is not None]
+        ctx.tool_findings.append(dict(route=route, n=len(elig), unused=len(unused), usd=usd_, n_cached=n_cached,
+                                      tokens=pct([calls[i].tool_schema for i in unused], 50),
+                                      defined=pct(defined, 50) if defined else None, sess=sess,
+                                      sess_known=bool(sess)))
+    ctx.tool_findings.sort(key=lambda f: -f["usd"])
+
+
+def _spirals(ctx):
+    """MEASURED spend in spirals, per route with task ids: a task whose calls or tokens exceed SPIRAL_FACTOR x the
+    route's median task and that has at least SPIRAL_MIN_FAILED failed calls. Needs SPIRAL_MIN_TASKS tasks."""
+    calls = ctx.calls
+    ctx.spiral_rows, ctx.spiral_thin = [], []
+    for route, idxs in ctx.by_route.items():
+        groups = defaultdict(list)
+        for i in idxs:
+            if calls[i].task is not None:
+                groups[calls[i].task].append(i)
+        if not groups:
+            continue
+        if len(groups) < SPIRAL_MIN_TASKS:
+            ctx.spiral_thin.append((route, len(groups)))
+            continue
+        n_calls = dict((t, len(g)) for t, g in groups.items())
+        n_toks = dict((t, sum(calls[i].inp + calls[i].out for i in g)) for t, g in groups.items())
+        med_c, med_t = pct(list(n_calls.values()), 50), pct(list(n_toks.values()), 50)
+        sp_tasks = []
+        for t, g in groups.items():
+            failed = sum(1 for i in g if calls[i].ok is False)
+            if failed >= SPIRAL_MIN_FAILED and (n_calls[t] > SPIRAL_FACTOR * med_c or n_toks[t] > SPIRAL_FACTOR * med_t):
+                sp_tasks.append(t)
+        spend = sum(cost(ctx.base[i]) for t in sp_tasks for i in groups[t])
+        route_spend = sum(cost(ctx.base[i]) for i in idxs)
+        sess = set(calls[i].session for t in sp_tasks for i in groups[t] if calls[i].session is not None)
+        ctx.spiral_rows.append(dict(route=route, tasks=len(groups), med_calls=med_c, med_toks=med_t, n=len(sp_tasks),
+                                    spend=spend, route_spend=route_spend, sess=sess,
+                                    calls=sum(len(groups[t]) for t in sp_tasks)))
+    ctx.spiral_rows.sort(key=lambda r: -r["spend"])
+
+
+# ---------------------------------------------------------------- open scope: other providers
+def reprice(ctx, idxs, model):
+    """Spend of these calls if the same tokens (uncached, cached, cache writes, output) were billed at `model`'s list prices."""
+    tr = ctx.prices["models"][model]
+    tt = provider_terms(ctx.prices, tr.get("provider"))
+    out = 0.0
+    for i in idxs:
+        s = ctx.base[i].copy()
+        s.rin, s.rc, s.ro = tr["input"], tr["cached"], tr["output"]
+        s.rcw, s.rcw1 = tr["input"] * tt["write_mult"], tr["input"] * tt["write_1h_mult"]
+        out += cost(s)
+    return out
+
+
+def decision_shaped(ctx, route):
+    """A route whose answer is a tiny verdict: routes.json says decision_shaped true, or output p50 <= 5 tokens on 50+ calls."""
+    doc = getattr(ctx, "routes_doc", None)
+    for r in (doc or {}).get("routes", []):
+        if isinstance(r, dict) and r.get("id") == route and r.get("decision_shaped") is True:
+            return True
+    idxs = ctx.by_route[route]
+    return len(idxs) >= DECISION_MIN_CALLS and pct([ctx.calls[i].out for i in idxs], 50) <= DECISION_MAX_OUT
+
+
+def cheapest_decision_model(prices):
+    best = None
+    for name, m in prices["models"].items():
+        if m.get("class") == "decision":
+            key = (float(m["input"]), float(m["output"]), name)
+            if best is None or key < best[0]:
+                best = (key, name)
+    return best[1] if best else None
+
+
+def open_candidates(ctx):
+    """Per route with priced spend: up to OPEN_MAX_CANDIDATES cheaper models from other providers (same or one lower
+    class, never judged for equivalence), priced at list. Decision-shaped routes get the cheapest decision-class model
+    first, as a gate net of its own calls. Returns a list of route dicts."""
+    pm, calls = ctx.prices["models"], ctx.calls
+    seen_providers = set(c.provider for c in calls if c.provider)
+    out = []
+    order, sp = routes_by_spend(ctx)
+    for route in order:
+        idxs = ctx.by_route[route]
+        cur = sp[route]
+        if cur <= 0:
+            continue
+        by_model = defaultdict(float)
+        for i in idxs:
+            by_model[calls[i].model] += cost(ctx.base[i])
+        dom = max(by_model, key=lambda m: by_model[m])
+        providers = set(pm[m].get("provider") for m in by_model)
+        cls = pm[dom].get("class")
+        dshape = decision_shaped(ctx, route)
+        rec = dict(route=route, spend=cur, model=dom, provider=pm[dom].get("provider"), cls=cls, n=len(idxs),
+                   dshape=dshape, cands=[], note=None, sess=set(calls[i].session for i in idxs if calls[i].session is not None))
+        if cls is None:
+            rec["note"] = "%s has no class in prices.json, so no candidates are listed." % dom
+            out.append(rec)
+            continue
+        dec = cheapest_decision_model(ctx.prices)
+        if dshape and dec:
+            rep = reprice(ctx, idxs, dec)
+            if cls == "decision":
+                if dec == dom or rep >= cur:
+                    rec["note"] = "Decision-shaped route already on the cheapest priced decision model (%s)." % dom
+                else:
+                    rec["cands"].append(dict(model=dec, kind="swap", repriced=rep, **net_of_added_calls(cur - rep, 0.0)))
+            elif rep < cur:
+                rec["cands"].append(dict(model=dec, kind="gate", repriced=rep,
+                                         **net_of_added_calls((1.0 - GATE_ESCALATE_SHARE) * cur, rep)))
+        if cls != "decision":
+            allowed = set([cls])
+            k = CLASS_LADDER.index(cls) if cls in CLASS_LADDER else -1
+            if k > 0:
+                allowed.add(CLASS_LADDER[k - 1])
+            pool = []
+            for name, m in pm.items():
+                if m.get("class") in allowed and m.get("class") != "decision" and m.get("provider") not in providers:
+                    rep = reprice(ctx, idxs, name)
+                    if rep < cur:
+                        pool.append((rep, name))
+            pool.sort()
+            for rep, name in pool[:max(0, OPEN_MAX_CANDIDATES - len(rec["cands"]))]:
+                rec["cands"].append(dict(model=name, kind="swap", repriced=rep, **net_of_added_calls(cur - rep, 0.0)))
+        for c in rec["cands"]:
+            c["provider"] = pm[c["model"]].get("provider")
+            c["cls"] = pm[c["model"]].get("class")
+            c["known_vendor"] = c["provider"] in seen_providers
+        out.append(rec)
+    return out
+
+
+def open_section(ctx):
+    L = ["## Other providers (open scope, HYPOTHESIS)", "",
+         "Models from providers other than the route's own, taken from prices.json by `class` (the same class or one lower) and list price; "
+         "no model judges equivalence. Low end is $0 for every candidate. High end is the route's window spend re-priced at the "
+         "candidate's list prices (same tokens, same cached and uncached split), x 30/%.1f days. **Nothing here is in the action table, "
+         "the totals or the headline, which are the same under --scope stay.** The candidate list is limited to the models priced in "
+         "prices.json (dated %s): a cheaper model that is not in the file is not shown." % (ctx.days, ctx.prices.get("_date", "unknown")), ""]
+    recs = open_candidates(ctx)
+    shown = 0
+    for rec in recs:
+        if not rec["cands"] and not rec["note"]:
+            continue
+        shown += 1
+        low, nsess = low_evidence(rec["sess"])
+        L += ["### %s (%s, %s, class %s; %s in the window, n=%s calls%s)"
+              % (rec["route"], rec["model"], rec["provider"], rec["cls"] or "none", usd(rec["spend"]), num(rec["n"]),
+                 ", low evidence (%s)" % pl(nsess, "session") if low else ""), ""]
+        if rec["note"]:
+            L += [rec["note"], ""]
+        if not rec["cands"]:
+            continue
+        rows, extra = [], []
+        for c in rec["cands"]:
+            net = max(0.0, c["net"])
+            vendor = ("%s is already in this export (a key may exist); this route's data would go there too"
+                      % c["provider"] if c["known_vendor"] else
+                      "new vendor and key (%s); this route's data goes to a provider not in this export" % c["provider"])
+            rows.append([c["model"], c["provider"], c["cls"], usd(c["repriced"]) + (" (all calls, as a gate)" if c["kind"] == "gate" else ""),
+                         "$0-%s%s" % (usd(net * ctx.k), " net of gate" if c["kind"] == "gate" else ""), vendor + "; TTFT and region differ"])
+            if c["kind"] == "gate":
+                extra.append("Net of the gate (assumption A2: the gate cannot decide %.0f%% of calls and passes them on to %s): "
+                             "%s of %s calls no longer reach %s = %s; the gate's own %s calls at %s list prices cost %s; net = %s - %s = %s in the window%s."
+                             % (100 * GATE_ESCALATE_SHARE, rec["model"], num(round((1 - GATE_ESCALATE_SHARE) * rec["n"])), num(rec["n"]),
+                                rec["model"], usd(c["gross"]), num(rec["n"]), c["model"], usd(c["added"]), usd(c["gross"]), usd(c["added"]),
+                                usd(c["net"]) if c["net"] > 0 else "$0.00",
+                                "" if c["net"] > 0 else " (the gate costs more than it saves)"))
+        L += table(["candidate", "provider", "class", "route spend at list price", "monthly range", "switching cost"], rows)
+        L += [""] + ["- " + e for e in extra]
+        if rec["dshape"]:
+            L.append("- **Eval:** replay 100-200 logged calls of this route on the candidate and compare its verdict with the logged verdict by "
+                     "exact match; adopt only at a match rate you set beforehand. The route is decision-shaped (output p50 at most %d tokens on %d+ "
+                     "calls, or marked decision_shaped in routes.json)." % (DECISION_MAX_OUT, DECISION_MIN_CALLS))
+        else:
+            L.append("- **Eval:** replay 100-200 logged calls of this route, stratified by input size, on the candidate and grade the outputs with "
+                     "your own pass criteria; the figure falls to $0 for the route if it fails.")
+        L.append("")
+    if not shown:
+        L += ["No route has a cheaper priced model of the same or one lower class at another provider in prices.json.", ""]
+    return L
+
+
+def tool_section(ctx):
+    if not ctx.tool_cols:
+        return []
+    L = ["## Unused tool schemas (MEASURED dollars; the action is a HYPOTHESIS)", ""]
+    if not ctx.tool_findings:
+        return L + ["%s checked (tool_schema_tokens and tool_calls logged); none sends tool definitions it never calls on %.0f%% of its calls "
+                    "across %d or more sessions." % (pl(ctx.tool_checked, "route"), 100 * TOOL_UNUSED_SHARE, TOOL_MIN_SESSIONS), ""]
+    L += ["Tool definitions are in the request on every call; on these routes the response called no tool on at least %.0f%% of the calls "
+          "that carry a schema, across %d or more sessions (when session_id is logged). The dollars are tokens in the schema x the unused "
+          "calls x the rate those tokens were billed at: the cached rate on a call whose cached tokens cover the schema, otherwise the "
+          "uncached input rate (assumption: the schema is billed as plain input; a cache write would cost more). They are what the schemas "
+          "cost, not a saving: removing a tool may change the model's behaviour, so the action is a HYPOTHESIS. Not in the action table or the "
+          "totals (it overlaps caching and trimming)." % (100 * TOOL_UNUSED_SHARE, TOOL_MIN_SESSIONS), ""]
+    rows = []
+    for f in ctx.tool_findings:
+        ev = "n=%s calls, %s" % (num(f["n"]), pl(len(f["sess"]), "session") if f["sess_known"] else "sessions not logged")
+        if low_evidence(f["sess"])[0]:
+            ev += ", low evidence"
+        rows.append([f["route"], ev, share(f["unused"], f["n"]) + " of its schema-carrying calls (%s)" % num(f["unused"]),
+                     (num(f["defined"]) if f["defined"] is not None else "n/a") + " tools, " + num(f["tokens"]) + " tokens",
+                     "%s (%s a month)" % (usd(f["usd"]), mo(ctx, f["usd"])), "MEASURED",
+                     "HYPOTHESIS: drop or defer unused tool definitions", "yes: replay 100-200 calls with the tools removed"])
+    L += table(["where", "evidence", "calls with no tool call", "schema size (p50)", "schema cost in window", "dollars", "action", "eval needed"], rows)
+    return L + [""]
+
+
+def spiral_section(ctx):
+    if not ctx.spiral_rows and not ctx.spiral_thin:
+        return []
+    L = ["## Spirals: tasks that loop and fail (MEASURED)", ""]
+    if not ctx.has["success"]:
+        return L + ["The export has no success column, so failed calls cannot be counted and no spiral is judged.", ""]
+    L += ["A spiral is a task (calls sharing a task_id on one route) whose calls or tokens exceed %.1fx its route's median task and that has at "
+          "least %d failed calls. A route needs %d tasks before it is judged. The spend is read from the export; it overlaps the failed-call "
+          "step and is in no total. A spiral can be a hard task rather than a bug: read a few before fixing." % (SPIRAL_FACTOR, SPIRAL_MIN_FAILED, SPIRAL_MIN_TASKS), ""]
+    rows = []
+    for r in ctx.spiral_rows:
+        ev = "n=%s tasks" % num(r["tasks"])
+        if r["sess"]:
+            ev += ", %s" % pl(len(r["sess"]), "session")
+        if low_evidence(r["sess"])[0]:
+            ev += ", low evidence"
+        rows.append([r["route"], ev, "%s calls, %s tokens" % (num(r["med_calls"], 1), num(r["med_toks"])),
+                     "%s (%s of tasks)" % (num(r["n"]), share(r["n"], r["tasks"])),
+                     "%s (%s of route spend; %s a month)" % (usd(r["spend"]), share(r["spend"], r["route_spend"]), mo(ctx, r["spend"])),
+                     "MEASURED"])
+    if rows:
+        L += table(["where", "evidence", "median task", "spiral tasks", "spend in spirals", "confidence"], rows)
+        L.append("")
+    if ctx.spiral_thin:
+        L.append("Not enough tasks (under %d, so no spiral is judged): %s." % (SPIRAL_MIN_TASKS, ", ".join(
+            "%s (%s)" % (r, pl(n, "task")) for r, n in sorted(ctx.spiral_thin)[:6])))
+        L.append("")
+    return L
 
 
 def cache_ratio(w, r):
@@ -956,9 +1264,9 @@ def waterfall(ctx, steps):
 
 
 # ---------------------------------------------------------------- analysis
-def analyze(parsed, prices, ttft_budget=None, view="auto", window_days=None):
+def analyze(parsed, prices, ttft_budget=None, view="auto", window_days=None, scope="stay"):
     ctx = build_ctx(parsed, prices, window_days)
-    ctx.budget, ctx.view = ttft_budget, view
+    ctx.budget, ctx.view, ctx.scope = ttft_budget, view, scope
     ctx.not_estimated = []
     active = []
     for s in STEPS:
@@ -1309,6 +1617,16 @@ def _looks_cumulative(v):
     return sum(1 for a, b in steps if b >= a) >= 0.8 * len(steps) and sum(1 for a, b in steps if b > a) >= 0.5 * len(steps)
 
 
+def scope_line(ctx):
+    if getattr(ctx, "scope", "stay") == "open":
+        return ("- **Scope: open.** Every action in the table stays with the providers already in the export; in addition a separate section "
+                "lists models from other providers as HYPOTHESIS (list price, $0 floor, switching cost, eval named). Those candidates are in no "
+                "total: the headline and the action table are the same under --scope stay.")
+    return ("- **Scope: stay.** Every action stays with the providers already in the export: caching, trimming, output caps, batching, "
+            "failed-call fixes and a smaller model at the same provider. Models from other providers are not considered; run with `--scope open` "
+            "to list them.")
+
+
 def render(ctx):
     L = []
     calls = ctx.calls
@@ -1344,6 +1662,7 @@ def render(ctx):
     L.append("")
     win = ("%s to %s UTC" % (datetime.fromtimestamp(ctx.start, timezone.utc).strftime("%Y-%m-%d %H:%M"),
                              datetime.fromtimestamp(ctx.end, timezone.utc).strftime("%Y-%m-%d %H:%M"))) if ctx.start else "no timestamps"
+    L.append(scope_line(ctx))
     L.append("- **Window:** %.1f days (%s), %s calls, %s priced spend; about %s a month if the window is typical (%s x 30 / %.1f days)."
              % (ctx.days, win, num(n), usd(ctx.spend), usd(ctx.monthly), usd(ctx.spend), ctx.days))
     if ctx.days < 7 or ctx.window_assumed:
@@ -1418,13 +1737,15 @@ def render(ctx):
         for rank, r in enumerate(ctx.ranked, 1):
             s = r["step"]
             rows.append([rank, s["name"], top_routes(r["acc_show"].by_route),
-                         "n=%s calls, %s of spend" % (num(r["acc_show"].n), share(r["acc_show"].spend, ctx.spend)),
+                         "n=%s calls, %s of spend%s" % (num(r["acc_show"].n), share(r["acc_show"].spend, ctx.spend),
+                                                        evidence_note(r["acc_show"].sess)),
                          rng(r["lo"] * ctx.k, r["hi"] * ctx.k), s["label"], s["short"], s["effort"]])
         rows.append(["", "**Total** (sum of the monthly column)", "", "", "**%s**" % rng(ctx.low_total, ctx.high_total), "", "", ""])
         L += table(["rank", "action", "where", "evidence", "monthly range after de-dup", "confidence", "eval needed", "effort"], rows)
     L.append("")
     L.append("Ranked by the low end of the range, then the high end. Does not change model output: caching, failed-call waste. "
-             "Depends on evals (floor $0): routing, trimming, output caps, batching.")
+             "Depends on evals (floor $0): routing, trimming, output caps, batching. \"Low evidence\" marks a finding whose calls carry "
+             "session_id and span fewer than %d sessions: treat it as a lead, not a result." % LOW_EVIDENCE_SESSIONS)
     for name, why in ctx.not_estimated:
         L.append("")
         L.append("Not estimated: %s (%s)." % (name.lower(), why))
@@ -1446,6 +1767,8 @@ def render(ctx):
                   "why the cache is rewritten (a changing prefix, the time-to-live running out between calls, a cache break), which the export "
                   "cannot show; no savings dollar is claimed and none is in the totals. To check: log the prefix hash on the re-writing calls "
                   "and compare it with the previous call of the same session.", ""]
+    L += tool_section(ctx)
+    L += spiral_section(ctx)
 
     # ---- workload view
     heads = []
@@ -1498,6 +1821,8 @@ def render(ctx):
             L.append("- " + line)
         L += ["", "**How to check.** %s" % s["eval"], "", "**What would prove it wrong.** %s" % s["wrong"]]
     L.append("")
+    if getattr(ctx, "scope", "stay") == "open":
+        L += open_section(ctx)
 
     # ---- money
     agg = money_table(ctx)
@@ -1563,6 +1888,17 @@ def render(ctx):
         L.append("- **Success.** A task succeeds when its last call succeeded. This is a proxy: a call can succeed technically and still give a wrong answer.")
     else:
         L.append("- **Success.** The export has no success column, so no cost per successful task and no failed-call waste figure.")
+    L.append("- **Scope.** `--scope stay` (default) keeps every action inside the providers in the export. `--scope open` adds the \"Other "
+             "providers\" section: candidates from prices.json by `class`, at list price, always HYPOTHESIS with a $0 low end, outside every "
+             "total. A route's spend there is re-priced token for token; a candidate that adds calls (a decision-model gate) is shown net of "
+             "those calls, priced from prices.json (A2: the gate passes %d%% of calls on to the current model)." % int(100 * GATE_ESCALATE_SHARE))
+    L.append("- **Evidence.** A finding whose calls carry session_id and span fewer than %d sessions is marked low evidence. Calls with no "
+             "session_id leave the session count unknown, which is not marked." % LOW_EVIDENCE_SESSIONS)
+    if ctx.tool_cols or ctx.spiral_rows or ctx.spiral_thin:
+        L.append("- **Tool schemas and spirals.** Both are MEASURED spend, outside the waterfall and the totals. Tool-schema dollars use the cached "
+                 "rate when the call's cached tokens cover the schema and the uncached input rate otherwise; a spiral is a task above %.1fx its "
+                 "route's median calls or tokens with %d or more failed calls (routes with under %d tasks are not judged)."
+                 % (SPIRAL_FACTOR, SPIRAL_MIN_FAILED, SPIRAL_MIN_TASKS))
     L.append("- **Limits.** No p95 is printed for groups under %d calls; no caching dollars without a prefix_hash column; routing only goes to the same "
              "provider's next tier down (the lowest input price among models sharing that tier); a provider marked cache_mode implicit in "
              "prices.json caches by itself, so no prompt-caching action is recommended for its routes; calls on unpriced models are excluded from every figure." % MIN_P95)
@@ -1712,11 +2048,13 @@ def main(argv=None):
     ap.add_argument("--ttft-budget-ms", type=float, help="your TTFT budget in ms; omitted lines if not given")
     ap.add_argument("--window-days", type=float, help="override the window length used for the monthly projection")
     ap.add_argument("--routes", help="the scan's routes.json: adds the UNMEASURED scan-only findings section")
+    ap.add_argument("--scope", choices=["stay", "open"], default="stay",
+                    help="stay (default): stay with the providers in the export; open: also list cheaper models from other providers (HYPOTHESIS)")
     args = ap.parse_args(argv)
     raw, bad = read_raw(args.export)
     parsed = parse_rows(raw, bad, args.input_excludes_cached)
     prices = load_prices(args.prices)
-    ctx = analyze(parsed, prices, args.ttft_budget_ms, args.view, args.window_days)
+    ctx = analyze(parsed, prices, args.ttft_budget_ms, args.view, args.window_days, args.scope)
     ctx.label = args.label
     if args.routes:
         ctx.routes_doc = load_routes(args.routes)
