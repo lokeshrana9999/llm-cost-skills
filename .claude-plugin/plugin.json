@@ -1,5 +1,5 @@
 {
-  "name": "llm-skill-pack",
+  "name": "llm-cost-skills",
   "version": "0.1.0",
   "description": "Find where an app spends money and time on LLM calls: map call sites, turn usage logs into numeric rows, and get a priced report tied to file:function.",
   "author": {
