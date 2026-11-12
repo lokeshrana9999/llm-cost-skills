@@ -1,0 +1,5 @@
+work/
+.claude/
+.mc-status-before.txt
+__pycache__/
+*.pyc

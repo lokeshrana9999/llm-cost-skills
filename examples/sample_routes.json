@@ -1,0 +1,39 @@
+{
+  "repo": "sample-app",
+  "root": "(made-up example, no real repo)",
+  "scanned": "2026-11-12",
+  "routes": [
+    {"id": "app/chat.py:reply", "kind": "sdk", "provider": "anthropic", "model": "claude-sonnet-5-5", "model_source": null,
+     "streaming": true, "cache_markers": "explicit", "max_tokens": 1024, "retries": 0,
+     "user_waits": true, "decision_model": false, "live": true, "stateless": false,
+     "notes": "made-up route: chat reply, system prompt marked for caching"},
+    {"id": "app/extract.py:parse_invoice", "kind": "sdk", "provider": "anthropic", "model": "claude-sonnet-5-5", "model_source": null,
+     "streaming": false, "cache_markers": "none", "max_tokens": 4096, "retries": "loop, up to 3 attempts",
+     "user_waits": false, "decision_model": false, "live": true, "stateless": true,
+     "notes": "made-up route: nightly batch extraction"},
+    {"id": "app/summarize.py:summarise", "kind": "sdk", "provider": "openai", "model": "gpt-4o", "model_source": null,
+     "streaming": false, "cache_markers": "implicit", "max_tokens": 512, "retries": "loop, up to 2 attempts",
+     "user_waits": false, "decision_model": false, "live": true, "stateless": true,
+     "notes": "made-up route: background ticket summaries"},
+    {"id": "app/gate.py:should_escalate", "kind": "http", "provider": "typesafe", "model": "jev-1.14.0", "model_source": null,
+     "streaming": false, "cache_markers": "none", "max_tokens": null, "retries": 0,
+     "user_waits": false, "decision_model": true, "live": true, "stateless": true,
+     "notes": "made-up route: per-event decision model"},
+    {"id": "app/warmup.py:keepalive", "kind": "sdk", "provider": "anthropic", "model": "claude-sonnet-5-5", "model_source": null,
+     "streaming": false, "cache_markers": "unknown", "max_tokens": 1, "retries": 0,
+     "user_waits": false, "decision_model": false, "live": true, "stateless": true,
+     "notes": "made-up route: keeps a worker warm"},
+    {"id": "app/voice.py:transcribe", "kind": "non_llm", "live": true, "notes": "made-up speech-to-text route, not priced"},
+    {"id": "tests/test_chat.py:test_reply", "kind": "sdk", "provider": "anthropic", "model": "claude-haiku-5-5", "model_source": null,
+     "streaming": false, "cache_markers": "none", "max_tokens": 64, "retries": 0,
+     "user_waits": false, "decision_model": false, "live": false, "stateless": true,
+     "notes": "made-up test-only route"}
+  ],
+  "usage_logs": [
+    {"path": "logs/usage.jsonl", "format": "jsonl",
+     "fields": ["model", "input_tokens", "output_tokens", "latency_ms", "route"],
+     "has_text_fields": false,
+     "covers_routes": ["app/chat.py:reply", "app/extract.py:parse_invoice", "app/summarize.py:summarise", "app/gate.py:should_escalate"]}
+  ],
+  "usage_gaps": ["warm-up calls on app/warmup.py:keepalive are logged with no token usage"]
+}
