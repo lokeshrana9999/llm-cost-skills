@@ -99,7 +99,8 @@ class RoutingTests(unittest.TestCase):
             self.assertLess(dst["tier"], src["tier"])
 
     def test_next_tier_down_stays_inside_provider(self):
-        self.assertEqual(calc.next_tier_down(PRICES, "claude-sonnet-4-5"), "claude-haiku-4-5")
+        # two models share tier 1 at anthropic: the lower input price wins
+        self.assertEqual(calc.next_tier_down(PRICES, "claude-sonnet-4-5"), "claude-haiku-5-5")
         self.assertEqual(calc.next_tier_down(PRICES, "gpt-4o"), "gpt-4o-mini")
         self.assertIsNone(calc.next_tier_down(PRICES, "gpt-4o-mini"))
         self.assertIsNone(calc.next_tier_down(PRICES, "claude-haiku-4-5"))
@@ -227,8 +228,8 @@ class HashedIdTests(unittest.TestCase):
         self.assertNotIn("secret-session-4711", text)
         # the costliest task is listed, by its short hash
         h = calc.hid("secret-customer-4711")
-        self.assertEqual(len(h), 10)
-        self.assertRegex(h, r"^[0-9a-f]{10}$")
+        self.assertEqual(len(h), 12)
+        self.assertRegex(h, r"^[0-9a-f]{12}$")
         self.assertIn(h, text)
 
     def test_hashing_keeps_task_grouping(self):
@@ -740,6 +741,75 @@ class CheckRowsTests(unittest.TestCase):
             p = self._write(d, [good])
             self.assertEqual(check_rows.main([p, "--forbid", "zzz-not-there"]), 0)
             self.assertEqual(check_rows.main([p, "--forbid", "a.py:f"]), 1)
+
+
+class ReviewFixTests(unittest.TestCase):
+    def _prices(self):
+        import copy
+        return copy.deepcopy(PRICES)
+
+    def test_tier_tie_picks_the_lowest_input_price_whatever_the_file_order(self):
+        for reverse in (False, True):
+            p = self._prices()
+            for name, price_in in (("tie-a", 0.5), ("tie-b", 0.2), ("tie-c", 0.2)):
+                p["models"][name] = dict(provider="anthropic", tier=1, input=price_in, output=1.0, cached=0.02)
+            p["models"] = dict(sorted(p["models"].items(), reverse=reverse))
+            # claude-haiku-5-5 (0.10) is also tier 1 and cheaper than every tie-* model
+            self.assertEqual(calc.next_tier_down(p, "claude-sonnet-4-5"), "claude-haiku-5-5")
+            del p["models"]["claude-haiku-5-5"]
+            del p["models"]["claude-haiku-4-5"]
+            self.assertEqual(calc.next_tier_down(p, "claude-sonnet-4-5"), "tie-b")     # tie-b and tie-c cost the same; the name breaks it
+
+    def test_tie_rule_is_in_the_method_section(self):
+        text = calc.render(run(make_rows()))
+        self.assertIn("lowest input price", text)
+
+    def test_implicit_cache_provider_gets_no_caching_action(self):
+        ctx = run(make_rows())
+        self.assertEqual(ctx.prices["providers"]["openai"].get("cache_mode"), "implicit")
+        self.assertEqual(ctx.implicit_routes, {"chat"})                 # the gpt-4o route
+        for key in ctx.cache_groups:
+            self.assertNotEqual(key[1], "openai")
+        text = calc.render(ctx)
+        self.assertIn("Skipped (the provider caches automatically", text)
+        for l in text.splitlines():
+            if l.startswith("| 1 |") or l.startswith("- **Do first:**"):
+                self.assertNotIn("app.py:chat", l)
+
+    def test_only_implicit_routes_means_no_caching_action_at_all(self):
+        rows = [r for r in make_rows() if r["route"] == "chat"]
+        ctx = run(rows)
+        self.assertNotIn("caching", [r["step"]["key"] for r in ctx.rows])
+        self.assertTrue(any("caches these prompts automatically" in why for _, why in ctx.not_estimated))
+
+    def test_caching_card_and_table_agree_that_no_replay_is_needed(self):
+        text = calc.render(run(make_rows()))
+        self.assertIn("no: compare billed cached tokens", text)
+        self.assertIn("No replay is needed: caching does not change model output.", text)
+        self.assertNotIn("to confirm outputs are unchanged", text)
+
+    def test_plurals_and_ranges(self):
+        self.assertEqual(calc.pl(1, "route"), "1 route")
+        self.assertEqual(calc.pl(2, "route"), "2 routes")
+        self.assertEqual(calc.span(1053.2, 1052.8, calc.num), "1,053")
+        self.assertEqual(calc.span(900, 1053, calc.num), "900-1,053")
+        self.assertEqual(calc.usd(0.00001), "<$0.0001")
+        self.assertEqual(calc.usd(0), "$0.00")
+        self.assertEqual(calc.price(0.075), "$0.075")
+        self.assertEqual(calc.price(3.0), "$3.00")
+        self.assertEqual(calc.price(0.042), "$0.042")
+        self.assertEqual(calc.dur_cell([0.0, 0.0]), "n/a")
+
+    def test_floor_line_says_1_route_and_1_call(self):
+        rows = [dict(r) for r in make_rows(n_voice=250, n_chat=0, n_small=0)]
+        rows.append(dict(model="claude-sonnet-4-5", route="warm", usage_missing="true"))
+        text = calc.render(run(rows))
+        self.assertIn("1 call on 1 route has no token usage logged", text)
+
+    def test_next_step_asks_to_collect_and_rerun_not_to_share(self):
+        text = calc.render(run(make_rows()))
+        self.assertIn("Collect an export of 7-30 days", text)
+        self.assertNotIn("Share an export", text)
 
 
 if __name__ == "__main__":

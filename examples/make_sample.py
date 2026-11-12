@@ -48,7 +48,7 @@ def lognorm(rng, median, sigma, lo=1, hi=None):
 
 
 def hid(prefix, n):
-    return hashlib.sha256(("%s-%d" % (prefix, n)).encode()).hexdigest()[:16]
+    return hashlib.sha256(("%s-%d" % (prefix, n)).encode()).hexdigest()[:12]
 
 
 def phash(route):

@@ -51,7 +51,7 @@ Leave `report.md` as calc wrote it so `calc.py` reproduces it exactly.
 3. Run `python <pack>/scripts/privacy_check.py work/<repo> --phrases-file <that file>`. It searches every file under `work/<repo>/` (report.md, diagnosis.md, rows.jsonl, adapter.py, routes.json) and prints which phrase line hit which file, never the phrase or its context. Exit 0 means no hits.
 4. Delete the phrases file.
 
-If anything leaks, delete the leaking file, fix the adapter or the note, and rerun. The report shows 10-character hashes for task and session ids; a raw id in any file is a leak.
+If anything leaks, delete the leaking file, fix the adapter or the note, and rerun. The report shows 12-character hashes for task and session ids; a raw id in any file is a leak.
 
 ## 4. Finish
 

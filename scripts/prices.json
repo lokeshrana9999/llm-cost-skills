@@ -1,8 +1,7 @@
 {
-  "_comment": "Every price field in this file: verify against provider pricing pages before use. USD per 1M tokens. 'cached' is the price of a cached input token (cache read). Provider blocks carry cache and batch terms; cache_write_multiplier is the 5-minute cache-write price as a multiple of input, cache_write_1h_multiplier the 1-hour one (default 2.0). A model missing here is reported as unpriced, never guessed.",
+  "_comment": "Every price field in this file: verify against provider pricing pages before use. USD per 1M tokens. 'cached' is the price of a cached input token (cache read). Provider blocks carry cache and batch terms; cache_write_multiplier is the 5-minute cache-write price as a multiple of input, cache_write_1h_multiplier the 1-hour one (default 2.0). A model missing here is reported as unpriced, never guessed. A provider block with cache_mode \"implicit\" caches prompts by itself, so the report recommends no prompt-caching action for its routes.",
   "_date": "2026-11-11",
   "_status": "unverified, edit before use",
-  "_missing": "None of the current Claude 5.5 models is missing; add others when needed, never guessed.",
   "providers": {
     "anthropic": {
       "_verify": "verify against provider pricing pages",
@@ -14,13 +13,14 @@
     },
     "openai": {
       "_verify": "verify against provider pricing pages",
+      "cache_mode": "implicit",
       "cache_ttl_s": 300,
       "cache_min_tokens": 1024,
       "cache_write_multiplier": 1.0,
       "batch_discount": 0.5
     },
     "typesafe": {
-      "_verify": "Jev decision model: priced per the owner's stated rate, input only",
+      "_verify": "https://docs.typesafe.ai/models.md: $0.042 per 1M input, output free (checked 2026-11-12)",
       "cache_ttl_s": 300,
       "cache_min_tokens": 1000000000,
       "cache_write_multiplier": 1.0,
@@ -36,9 +36,9 @@
     "claude-haiku-4-5":  {"_verify": "verify against provider pricing pages", "provider": "anthropic", "tier": 1, "input": 1.00, "output": 5.00,  "cached": 0.10},
     "gpt-4o":            {"_verify": "verify against provider pricing pages", "provider": "openai",    "tier": 2, "input": 2.50, "output": 10.00, "cached": 1.25},
     "gpt-4o-mini":       {"_verify": "verify against provider pricing pages", "provider": "openai",    "tier": 1, "input": 0.15, "output": 0.60,  "cached": 0.075},
-    "claude-opus-5-5":   {"_verify": "Anthropic first-party list price, claude-api skill table cached 2026-11-03", "provider": "anthropic", "tier": 3, "input": 4.00, "output": 20.00, "cached": 0.20},
-    "claude-sonnet-5-5": {"_verify": "Anthropic first-party list price, claude-api skill table cached 2026-11-03", "provider": "anthropic", "tier": 2, "input": 2.00, "output": 10.00, "cached": 0.10},
-    "claude-haiku-5-5":  {"_verify": "Anthropic list price (prompts up to 100K tokens), claude-api skill table cached 2026-11-03; cached = 0.1x input per Anthropic prompt-caching docs", "provider": "anthropic", "tier": 1, "input": 0.10, "output": 0.50, "cached": 0.01},
-    "jev-1.14.0":       {"_verify": "owner-stated: $0.042 per 1M input, output free", "provider": "typesafe", "input": 0.042, "output": 0.0, "cached": 0.042}
+    "claude-opus-5-5":   {"_verify": "https://platform.claude.com/docs/en/about-claude/pricing (Anthropic list price; verify before use)", "provider": "anthropic", "tier": 3, "input": 4.00, "output": 20.00, "cached": 0.20},
+    "claude-sonnet-5-5": {"_verify": "https://platform.claude.com/docs/en/about-claude/pricing (Anthropic list price; verify before use)", "provider": "anthropic", "tier": 2, "input": 2.00, "output": 10.00, "cached": 0.10},
+    "claude-haiku-5-5":  {"_verify": "https://platform.claude.com/docs/en/about-claude/pricing (Anthropic list price; verify before use); cached = 0.1x input per Anthropic prompt-caching docs", "provider": "anthropic", "tier": 1, "input": 0.10, "output": 0.50, "cached": 0.01},
+    "jev-1.14.0":       {"_verify": "https://docs.typesafe.ai/models.md: $0.042 per 1M input, output free (checked 2026-11-12)", "provider": "typesafe", "input": 0.042, "output": 0.0, "cached": 0.042}
   }
 }

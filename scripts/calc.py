@@ -109,7 +109,27 @@ def usd(v):
         return "$%s" % format(int(round(v)), ",")
     if abs(v) >= 1 or v == 0:
         return "$%s" % format(v, ",.2f")
+    if abs(v) < 0.00005:
+        return "<$0.0001"
     return "$%.3f" % v if abs(v) >= 0.01 else "$%.4f" % v
+
+
+def price(v):
+    """A per-1M-token price with enough decimals to be exact (0.075 stays 0.075, 3 prints 3.00)."""
+    s = ("%.6f" % v).rstrip("0")
+    whole, _, frac = s.partition(".")
+    return "$%s.%s" % (whole, frac.ljust(2, "0"))
+
+
+def pl(n, one, many=None):
+    """'1 route', '2 routes'."""
+    return "%s %s" % (num(n), one if n == 1 else (many or one + "s"))
+
+
+def span(lo, hi, fmt):
+    """A low-high range; one value when both ends print the same."""
+    a, b = fmt(lo), fmt(hi)
+    return a if a == b else "%s-%s" % (a, b)
 
 
 def rng(lo, hi):
@@ -126,8 +146,8 @@ def mtok(v):
 
 
 def hid(v):
-    """Short opaque id: first 10 hex chars of sha256. Raw task/session ids are never printed."""
-    return hashlib.sha256(str(v).encode("utf-8")).hexdigest()[:10]
+    """Short opaque id: first 12 hex chars of sha256. Raw task/session ids are never printed."""
+    return hashlib.sha256(str(v).encode("utf-8")).hexdigest()[:12]
 
 
 MODEL_PREFIXES = ("anthropic/", "openai/", "typesafe/", "google/", "azure/")
@@ -350,15 +370,17 @@ def provider_terms(prices, provider):
 
 
 def next_tier_down(prices, model):
-    """Same provider, the highest tier below this model's tier; None if none."""
+    """Same provider, the highest tier below this model's tier; None if none. If several models share
+    that tier, the one with the lowest input price wins (then the name, so the pick is stable)."""
     m = prices["models"].get(model)
     if not m or m.get("provider") is None or m.get("tier") is None:
         return None
-    best = None
+    best, best_key = None, None
     for name, v in prices["models"].items():
         if v.get("provider") == m["provider"] and v.get("tier") is not None and v["tier"] < m["tier"]:
-            if best is None or v["tier"] > prices["models"][best]["tier"]:
-                best = name
+            key = (-v["tier"], float(v["input"]), name)
+            if best_key is None or key < best_key:
+                best, best_key = name, key
     return best
 
 
@@ -554,8 +576,12 @@ def _candidates(ctx):
         if hit / float(len(idxs)) >= CACHED_ROUTE_SHARE:
             ctx.cached_routes.add(r)
     cg = defaultdict(list)
+    ctx.implicit_routes = set()
     for c in calls:
         if c.phash and c.route not in ctx.cached_routes:
+            if prices.get("providers", {}).get(c.provider or "", {}).get("cache_mode") == "implicit":
+                ctx.implicit_routes.add(c.route)      # the provider caches by itself: nothing to turn on
+                continue
             cg[(c.phash, c.provider)].append(c.idx)
     ctx.cache_groups, ctx.ptoks, ctx.ptoks_estimated = {}, {}, set()
     for key, idxs in cg.items():
@@ -712,11 +738,11 @@ def step_routing(ctx, st, level):
         mo_, tr = pm[model], pm[target]
         acc.lines.append(
             "High end, %s (%s -> %s): %s of %s calls have input <= %s and output <= %s tokens (the medians of this model and "
-            "route). They use %s uncached input, %s cached input and %s output tokens: now %s x $%.2f + %s x $%.2f + %s x "
-            "$%.2f (tokens in millions) = %s; at %s ($%.2f / $%.2f / $%.2f) = %s. Saving %s in the window, %s a month."
+            "route). They use %s uncached input, %s cached input and %s output tokens: now %s x %s + %s x %s + %s x "
+            "%s (tokens in millions) = %s; at %s (%s / %s / %s) = %s. Saving %s in the window, %s a month."
             % (route, model, target, num(g[0]), num(n), num(pin), num(pout), mtok(g[1]), mtok(g[2]), mtok(g[3]),
-               mtok(g[1]), mo_["input"], mtok(g[2]), mo_["cached"], mtok(g[3]), mo_["output"], usd(g[4]), target,
-               tr["input"], tr["cached"], tr["output"], usd(g[5]), usd(g[4] - g[5]), mo(ctx, g[4] - g[5])))
+               mtok(g[1]), price(mo_["input"]), mtok(g[2]), price(mo_["cached"]), mtok(g[3]), price(mo_["output"]), usd(g[4]), target,
+               price(tr["input"]), price(tr["cached"]), price(tr["output"]), usd(g[5]), usd(g[4] - g[5]), mo(ctx, g[4] - g[5])))
         if g[6] > 0:
             acc.lines[-1] += (" Cache-write tokens on these calls cost %s at the current write rates; they are included in both totals "
                               "and repriced at %s's write rates." % (usd(g[6]), target))
@@ -812,12 +838,15 @@ def step_caching(ctx, st, level):
     for route, p in sorted(per.items(), key=lambda kv: -(kv[1]["hs"] - kv[1]["pr"]))[:3]:
         avg = p["mv"] / p["h"] if p["h"] else 0
         acc.lines.append(
-            "%s %s: %s %s x %s prefix tokens moved to the cached rate x ($%.2f - $%.2f) / 1M = %s; minus %s cache writes "
+            "%s %s: %s %s x %s prefix tokens moved to the cached rate x (%s - %s) / 1M = %s; minus %s cache writes "
             "paying a write premium of x%.2f on the input rate = %s. Net %s in the window, %s a month."
             % ("Low end," if level == "low" else "High end,", route, num(p["h"]),
-               word % int(p["ttl"]) if level == "low" else word, num(avg), p["rin"], p["rc"], usd(p["hs"]),
+               word % int(p["ttl"]) if level == "low" else word, num(avg), price(p["rin"]), price(p["rc"]), usd(p["hs"]),
                num(p["w"]), p["mult"], usd(p["pr"]), usd(p["hs"] - p["pr"]), mo(ctx, p["hs"] - p["pr"])))
     acc.lines.extend(skipped)
+    if ctx.implicit_routes and level == "high":
+        acc.lines.append("Skipped (the provider caches automatically, cache_mode implicit in prices.json, nothing to turn on): %s."
+                         % ", ".join(sorted(ctx.implicit_routes)[:5]))
     if not per:
         acc.lines.append("%s no prefix repeats often enough to pay for the cache write premium, so the figure is $0."
                          % ("Low end:" if level == "low" else "High end:"))
@@ -846,16 +875,16 @@ def step_caps(ctx, st, level):
         rate = ctx.prices["models"][model]["output"]
         acc.lines.append(
             "High end, %s on %s: p95 output is %s tokens (n=%s calls). %s calls are above it and emit %s tokens over the cap, "
-            "x $%.2f per 1M = %s in the window, %s a month."
+            "x %s per 1M = %s in the window, %s a month."
             % (model, route, num(ctx.caps[(model, route)]), num(len(ctx.by_mr[(model, route)])), num(p[0]), num(p[1]),
-               rate, usd(p[2]), mo(ctx, p[2])))
+               price(rate), usd(p[2]), mo(ctx, p[2])))
     return acc
 
 
 def step_batching(ctx, st, level):
     acc, calls = Acc(), ctx.calls
     if level == "low":
-        acc.lines.append("Low end is $0: the route owner has not said the work can wait.")
+        acc.lines.append("Low end is $0: nobody has confirmed that the work can wait.")
         return acc
     per = defaultdict(lambda: [0, 0.0, 0.0, 0.0])
     for i, disc in ctx.batch_cand.items():
@@ -891,16 +920,19 @@ STEPS = [
          eval="Replay a fixed, versioned set of 100-200 long-session calls, stratified by route, with history summarised or windowed and grade the answers with your own pass criteria.",
          wrong="The growth may be retrieved documents or tool output that the answer needs, not old turns. This method cannot separate the two."),
     dict(key="caching", fn=step_caching, short="no: compare billed cached tokens", verb="enable prompt caching", name="Turn on prompt caching", label="MECHANICAL", bucket="A",
-         effort="Low", needs=lambda c: None if c.has["prefix"] else "no prefix_hash column",
-         eval="Enable caching on one route for one day and compare billed cached tokens and TTFT with the day before; replay a fixed, versioned set of 100-200 calls stratified by route to confirm outputs are unchanged.",
+         effort="Low",
+         needs=lambda c: ("no prefix_hash column" if not c.has["prefix"] else
+                          "the provider caches these prompts automatically (cache_mode implicit in prices.json); nothing to turn on"
+                          if (not c.cache_groups and c.implicit_routes) else None),
+         eval="Enable caching on one route for one day and compare billed cached tokens and TTFT with the day before. No replay is needed: caching does not change model output.",
          wrong="Hits only count when the prefix is identical byte for byte. If a timestamp or user name sits inside the prefix, billed cached tokens will come in under this figure."),
     dict(key="caps", fn=step_caps, short="yes: replay 100-200 calls", verb="cap output length", name="Cap output length per model and route", label="HYPOTHESIS", bucket="B",
          effort="Low", needs=lambda c: None if c.caps else "no model and route group has 200+ calls",
          eval="Replay the fixed, versioned set of 100-200 calls above the cap, stratified by route, with the limit set and grade completeness with your own pass criteria.",
          wrong="A cap truncates long answers; for structured output a cut-off reply is a failed call. The value is mostly latency, not dollars."),
-    dict(key="batching", fn=step_batching, short="ask the route owner, then replay", verb="batch the work that can wait", name="Move work that can wait to batch pricing", label="HYPOTHESIS", bucket="B",
+    dict(key="batching", fn=step_batching, short="ask who runs the route, then replay", verb="batch the work that can wait", name="Move work that can wait to batch pricing", label="HYPOTHESIS", bucket="B",
          effort="Medium", needs=lambda c: None if c.batch_cand else "no non-streamed calls on a provider with a batch discount",
-         eval="Ask each route owner whether the work can wait up to 24 hours, then send a fixed, versioned set of 100-200 calls, stratified by route, through the batch API and compare with the live outputs on your own pass criteria.",
+         eval="Ask whoever runs each route whether the work can wait up to 24 hours, then send a fixed, versioned set of 100-200 calls, stratified by route, through the batch API and compare with the live outputs on your own pass criteria.",
          wrong="Only work that can wait for the batch window and has no user waiting qualifies; batch limits and availability differ by model."),
 ]
 
@@ -1062,6 +1094,13 @@ def _latency_block(ctx, route, idxs):
     return L
 
 
+def dur_cell(dur):
+    """Task duration p50 / p95; n/a when every duration is zero (the export has no usable times)."""
+    if not dur or round(pct(dur, 50)) == 0 and round(pct(dur, 95)) == 0:
+        return "n/a"
+    return "%s / %s" % (p50(dur, lambda v: "%s s" % num(v)), p95(dur, lambda v: "%s s" % num(v)))
+
+
 def back_rows(ctx, routes):
     calls = ctx.calls
     rows, per_succ_vals = [], []
@@ -1101,7 +1140,7 @@ def back_rows(ctx, routes):
         elig = sum(cost(ctx.base[i]) for i in idxs if i in ctx.batch_cand)
         rows.append([r, num(nt), succ_s, "%.1f (n=%s calls)" % (len(idxs) / float(nt), num(len(idxs))), per_att, per_succ,
                      (usd(fail_sp) + " (%s of route spend)" % share(fail_sp, sp)) if judged else "n/a",
-                     top5, "%s / %s" % (p50(dur, lambda v: "%s s" % num(v)), p95(dur, lambda v: "%s s" % num(v))),
+                     top5, dur_cell(dur),
                      share(elig, sp) + " of route spend"])
     return rows, per_succ_vals
 
@@ -1295,8 +1334,9 @@ def render(ctx):
                     "is higher. Add them to prices.json.**"
                     % (num(ctx.unpriced_rows), num(tot), share(ctx.unpriced_rows, tot), ", ".join(sorted(ctx.unpriced))))
     if ctx.usage_missing:
-        note.append("**Spend is a floor: %s calls on %s routes have no token usage logged.**"
-                    % (num(len(ctx.usage_missing)), num(len(ctx.um_by_route))))
+        note.append("**Spend is a floor: %s on %s %s no token usage logged.**"
+                    % (pl(len(ctx.usage_missing), "call"), pl(len(ctx.um_by_route), "route"),
+                       "has" if len(ctx.usage_missing) == 1 else "have"))
     if getattr(ctx, "label", None):
         note.append(ctx.label)
     if note:
@@ -1415,12 +1455,12 @@ def render(ctx):
         if len(v) >= MIN_P95:
             ttp.append(pct(v, 95))
     if lat_routes and ttp:
-        heads.append("%s interactive route%s with TTFT p95 of %s-%s ms" % (len(lat_routes), "s" if len(lat_routes) != 1 else "", num(min(ttp)), num(max(ttp))))
+        heads.append("%s with TTFT p95 of %s ms" % (pl(len(lat_routes), "interactive route"), span(min(ttp), max(ttp), num)))
     elif lat_routes:
-        heads.append("%s interactive route%s" % (len(lat_routes), "s" if len(lat_routes) != 1 else ""))
+        heads.append(pl(len(lat_routes), "interactive route"))
     brows, bvals = back_rows(ctx, back_routes) if back_routes else ([], [])
     if brows:
-        h = "%s back-office route%s" % (len(back_routes), "s" if len(back_routes) != 1 else "")
+        h = pl(len(back_routes), "back-office route")
         if bvals:
             h += " at %s per successful task" % rng(min(bvals), max(bvals))
         heads.append(h)
@@ -1510,7 +1550,8 @@ def render(ctx):
     L.append("- **Ranges.** Each range comes from named assumptions, not a haircut. Low end: failed-call waste = %d%% of retried failed-call spend "
              "(A1); caching = repeats inside the provider cache time-to-live, net of the write premium, per prefix and never below $0; all other "
              "actions $0. High end: failed-call waste = all failed-call spend; caching = every repeat after the first on each prefix; routing = "
-             "short calls (input and output at or under the route medians) at the same provider's next tier down; trimming = input above the "
+             "short calls (input and output at or under the route medians) at the same provider's next tier down (when several models share "
+             "that tier, the one with the lowest input price in prices.json); trimming = input above the "
              "first call of the session at the input rate; caps = output above the p95 of its model and route at the output rate; batching = "
              "non-streamed calls on routes with no TTFT at the provider's batch discount." % int(AVOID_LOW * 100))
     L.append("- **Waterfall.** Steps run in a fixed order: failed-task waste, routing, trimming, caching, output caps, batching. Each step is "
@@ -1523,13 +1564,14 @@ def render(ctx):
     else:
         L.append("- **Success.** The export has no success column, so no cost per successful task and no failed-call waste figure.")
     L.append("- **Limits.** No p95 is printed for groups under %d calls; no caching dollars without a prefix_hash column; routing only goes to the same "
-             "provider's next tier down; calls on unpriced models are excluded from every figure." % MIN_P95)
+             "provider's next tier down (the lowest input price among models sharing that tier); a provider marked cache_mode implicit in "
+             "prices.json caches by itself, so no prompt-caching action is recommended for its routes; calls on unpriced models are excluded from every figure." % MIN_P95)
     drops = ", ".join("%s: %s" % (k, num(v)) for k, v in sorted(ctx.dropped.items())) or "none"
     L.append("- **Data quality.** %s rows read; %s dropped (%s); %s rows on unpriced models; %s priced rows have no usable timestamp."
              % (num(ctx.n_read), num(drop), drops, num(ctx.unpriced_rows), num(ctx.no_ts_rows)))
     if ctx.usage_missing:
-        L.append("- **Usage missing.** %s calls on %s routes are flagged usage_missing: counted, not priced, so spend is a floor."
-                 % (num(len(ctx.usage_missing)), num(len(ctx.um_by_route))))
+        L.append("- **Usage missing.** %s on %s flagged usage_missing: counted, not priced, so spend is a floor."
+                 % (pl(len(ctx.usage_missing), "call"), pl(len(ctx.um_by_route), "route")))
     if ctx.has["stateless"]:
         L.append("- **Stateless routes.** Calls flagged stateless are skipped by the trimming and session-growth steps and by session views: "
                  "each call stands alone, so a later call carries no history to cut.")
@@ -1548,21 +1590,29 @@ def render(ctx):
     L.append("")
     if cache_first:
         miss = [c for c in ("route", "success", "task_id") if not ctx.has[c if c != "task_id" else "task"]]
-        L.append("1. Share an export of 7-30 days with route, session_id and the cache-write columns on every call%s."
+        L.append("1. Collect an export of 7-30 days with route, session_id and the cache-write columns on every call%s and rerun."
                  % ("" if not miss else " (this export lacks: %s)" % ", ".join(miss)))
         L.append("2. Find what makes %s write the cache again (writes after the first call of a session, a changing prefix, the 1-hour "
                  "write) and compare billed cache-write tokens with the day before the change." % ctx.cache["rows"][0]["route"])
-        L.append("3. Replay a fixed, versioned set of 100-200 calls stratified by route, graded with your own pass criteria, to confirm outputs are unchanged.")
+        ev = [x for x in ctx.ranked if x["step"]["bucket"] == "B"]
+        L.append("3. %s" % ("Replay a fixed, versioned set of 100-200 calls stratified by route, graded with your own pass criteria, to test: %s."
+                            % ev[0]["step"]["verb"] if ev else
+                            "Keep the change only if billed cache-write tokens fall; no replay is needed, it does not change model output."))
     elif ctx.ranked:
         r = ctx.ranked[0]
         have = dict(route=ctx.has["route"], prefix_hash=ctx.has["prefix"], success=ctx.has["success"], task_id=ctx.has["task"])
         miss = [c for c in ("route", "prefix_hash", "success", "task_id") if not have[c]]
-        L.append("1. Share an export of 7-30 days with route, prefix_hash, success and task_id columns%s."
+        L.append("1. Collect an export of 7-30 days with route, prefix_hash, success and task_id columns%s and rerun."
                  % ("" if not miss else " (this export lacks: %s)" % ", ".join(miss)))
         L.append("2. %s on %s for one day and compare the billed result with the day before." % (r["step"]["verb"].capitalize(), first_route(r["acc_show"].by_route)))
         ev = [x for x in ctx.ranked if x["step"]["bucket"] == "B"]
-        L.append("3. Replay a fixed, versioned set of 100-200 calls stratified by route%s, graded with your own pass criteria."
-                 % (" to test: %s" % ev[0]["step"]["verb"] if ev else ""))
+        if ev:
+            L.append("3. Replay a fixed, versioned set of 100-200 calls stratified by route to test: %s, graded with your own pass criteria."
+                     % ev[0]["step"]["verb"])
+        elif r["step"]["bucket"] == "A":
+            L.append("3. Keep the change if the billed figures confirm it; no replay is needed, it does not change model output.")
+        else:
+            L.append("3. Replay a fixed, versioned set of 100-200 calls stratified by route, graded with your own pass criteria.")
     L.append("")
 
     # ---- appendix
