@@ -21,6 +21,7 @@ stateless (no trimming or context-growth for the row's session), logged_cost_usd
 tools_defined, tool_schema_tokens, tool_calls (the unused tool-schema finding).
 --scope: stay (default) keeps every action inside the providers in the export; open adds a separate
 "Other providers" section (HYPOTHESIS, never in the totals). The headline totals are the same for both.
+--gate-pass-through FRACTION: open scope; your measured share of calls a decision-model gate cannot decide.
 --routes: the scan's routes.json; adds the UNMEASURED scan-only findings section.
 input_tokens is assumed to include cached_input_tokens, cache_write_tokens and
 cache_write_1h_tokens (cache_write_tokens = 5-minute writes only). Pass
@@ -54,7 +55,9 @@ SPIRAL_MIN_TASKS = 20      # a route needs this many tasks before spirals are ju
 LOW_EVIDENCE_SESSIONS = 3  # a finding resting on fewer sessions (when its calls carry session_id) is marked low evidence
 DECISION_MAX_OUT = 5       # decision-shaped route: output p50 at or under this many tokens ...
 DECISION_MIN_CALLS = 50    # ... and at least this many calls
-GATE_ESCALATE_SHARE = 0.10  # assumption A2: share of calls a decision-model gate sends on to the current model
+OPEN_MIN_CALLS = 200       # open scope lists candidates for a route only with this many priced calls
+TOOL_MIN_CALLS = 50        # unused tool schemas: a route needs this many schema-carrying calls
+SPIRAL_MIN_CALLS_WHEN_MEDIAN_ONE = 4   # a route whose median task is 1 call: a spiral task needs at least this many calls
 OPEN_MAX_CANDIDATES = 3    # other-provider candidates listed per route
 CLASS_LADDER = ("small", "mid", "frontier")   # prices.json 'class' order; 'decision' is outside the ladder
 CUMULATIVE_MIN = 8    # logged_cost_usd needs this many values on a route before "looks cumulative" is judged
@@ -142,6 +145,11 @@ def price(v):
 def pl(n, one, many=None):
     """'1 route', '2 routes'."""
     return "%s %s" % (num(n), one if n == 1 else (many or one + "s"))
+
+
+def pct_share(f):
+    """A 0-1 fraction as a percentage with one decimal ('34.2%'), 0 and 100 without decimals."""
+    return "%.1f%%" % (100.0 * f) if 0 < f < 1 else "%d%%" % round(100.0 * f)
 
 
 def span(lo, hi, fmt):
@@ -386,7 +394,8 @@ def provider_terms(prices, provider):
     return dict(ttl=float(t.get("cache_ttl_s", 300)), min_tokens=float(t.get("cache_min_tokens", 1024)),
                 write_mult=float(t.get("cache_write_multiplier", 1.0)),
                 write_1h_mult=float(t.get("cache_write_1h_multiplier", 2.0)),
-                batch=float(t.get("batch_discount", 0.0)))
+                batch=float(t.get("batch_discount", 0.0)),
+                cache_verified=t.get("cache_terms_verified", True) is not False)
 
 
 def next_tier_down(prices, model):
@@ -700,14 +709,18 @@ def _cache_measured(ctx):
 
 
 def _tool_schemas(ctx):
-    """Route-level finding: tool definitions sent on (nearly) every call and never invoked.
+    """Route-level finding: tool definitions sent with the route's calls and (on 90%+ of the calls that carry one) never
+    invoked; a route needs TOOL_MIN_CALLS schema-carrying calls.
     MEASURED dollars = schema tokens x calls x the rate the tokens were billed at; the action is a HYPOTHESIS."""
     calls = ctx.calls
     ctx.tool_cols = any(c.tool_schema is not None or c.tool_calls is not None for c in calls)
-    ctx.tool_findings, ctx.tool_checked = [], 0
+    ctx.tool_findings, ctx.tool_checked, ctx.tool_thin = [], 0, 0
     for route, idxs in ctx.by_route.items():
         elig = [i for i in idxs if (calls[i].tool_schema or 0) > 0 and calls[i].tool_calls is not None]
         if not elig:
+            continue
+        if len(elig) < TOOL_MIN_CALLS:
+            ctx.tool_thin += 1
             continue
         ctx.tool_checked += 1
         unused = [i for i in elig if calls[i].tool_calls == 0]
@@ -754,6 +767,8 @@ def _spirals(ctx):
         sp_tasks = []
         for t, g in groups.items():
             failed = sum(1 for i in g if calls[i].ok is False)
+            if med_c <= 1 and n_calls[t] < SPIRAL_MIN_CALLS_WHEN_MEDIAN_ONE:
+                continue      # a route of one-call tasks: a spiral needs a real loop, not a 2-3 call retry
             if failed >= SPIRAL_MIN_FAILED and (n_calls[t] > SPIRAL_FACTOR * med_c or n_toks[t] > SPIRAL_FACTOR * med_t):
                 sp_tasks.append(t)
         spend = sum(cost(ctx.base[i]) for t in sp_tasks for i in groups[t])
@@ -767,13 +782,16 @@ def _spirals(ctx):
 
 # ---------------------------------------------------------------- open scope: other providers
 def reprice(ctx, idxs, model):
-    """Spend of these calls if the same tokens (uncached, cached, cache writes, output) were billed at `model`'s list prices."""
+    """Spend of these calls if the same tokens (uncached, cached, cache writes, output) were billed at `model`'s list prices.
+    A provider whose cache terms are unverified (cache_terms_verified false in prices.json) gets no cached-rate discount:
+    its cached tokens are priced at the input rate."""
     tr = ctx.prices["models"][model]
     tt = provider_terms(ctx.prices, tr.get("provider"))
     out = 0.0
     for i in idxs:
         s = ctx.base[i].copy()
-        s.rin, s.rc, s.ro = tr["input"], tr["cached"], tr["output"]
+        s.rin, s.ro = tr["input"], tr["output"]
+        s.rc = tr["cached"] if tt["cache_verified"] else tr["input"]
         s.rcw, s.rcw1 = tr["input"] * tt["write_mult"], tr["input"] * tt["write_1h_mult"]
         out += cost(s)
     return out
@@ -821,6 +839,10 @@ def open_candidates(ctx):
         dshape = decision_shaped(ctx, route)
         rec = dict(route=route, spend=cur, model=dom, provider=pm[dom].get("provider"), cls=cls, n=len(idxs),
                    dshape=dshape, cands=[], note=None, sess=set(calls[i].session for i in idxs if calls[i].session is not None))
+        if len(idxs) < OPEN_MIN_CALLS:
+            rec["note"] = "not enough calls to judge (n=%d, under %d)." % (len(idxs), OPEN_MIN_CALLS)
+            out.append(rec)
+            continue
         if cls is None:
             rec["note"] = "%s has no class in prices.json, so no candidates are listed." % dom
             out.append(rec)
@@ -834,8 +856,10 @@ def open_candidates(ctx):
                 else:
                     rec["cands"].append(dict(model=dec, kind="swap", repriced=rep, **net_of_added_calls(cur - rep, 0.0)))
             elif rep < cur:
-                rec["cands"].append(dict(model=dec, kind="gate", repriced=rep,
-                                         **net_of_added_calls((1.0 - GATE_ESCALATE_SHARE) * cur, rep)))
+                p = getattr(ctx, "gate_pass", None)
+                p = 0.0 if p is None else p
+                rec["cands"].append(dict(model=dec, kind="gate", repriced=rep, breakeven=1.0 - rep / cur,
+                                         **net_of_added_calls((1.0 - p) * cur, rep)))
         if cls != "decision":
             allowed = set([cls])
             k = CLASS_LADDER.index(cls) if cls in CLASS_LADDER else -1
@@ -846,10 +870,12 @@ def open_candidates(ctx):
                 if m.get("class") in allowed and m.get("class") != "decision" and m.get("provider") not in providers:
                     rep = reprice(ctx, idxs, name)
                     if rep < cur:
-                        pool.append((rep, name))
+                        pool.append((0 if m.get("class") == cls else 1, rep, name))
             pool.sort()
-            for rep, name in pool[:max(0, OPEN_MAX_CANDIDATES - len(rec["cands"]))]:
+            for _, rep, name in pool[:max(0, OPEN_MAX_CANDIDATES - len(rec["cands"]))]:
                 rec["cands"].append(dict(model=name, kind="swap", repriced=rep, **net_of_added_calls(cur - rep, 0.0)))
+        # same class as the route first, then by repriced spend (a decision-model gate is its own class, so it follows)
+        rec["cands"].sort(key=lambda c: (0 if pm[c["model"]].get("class") == cls else 1, c["repriced"]))
         for c in rec["cands"]:
             c["provider"] = pm[c["model"]].get("provider")
             c["cls"] = pm[c["model"]].get("class")
@@ -861,10 +887,14 @@ def open_candidates(ctx):
 def open_section(ctx):
     L = ["## Other providers (open scope, HYPOTHESIS)", "",
          "Models from providers other than the route's own, taken from prices.json by `class` (the same class or one lower) and list price; "
-         "no model judges equivalence. Low end is $0 for every candidate. High end is the route's window spend re-priced at the "
-         "candidate's list prices (same tokens, same cached and uncached split), x 30/%.1f days. **Nothing here is in the action table, "
-         "the totals or the headline, which are the same under --scope stay.** The candidate list is limited to the models priced in "
-         "prices.json (dated %s): a cheaper model that is not in the file is not shown." % (ctx.days, ctx.prices.get("_date", "unknown")), ""]
+         "no model judges equivalence. `class` is a hand-set price band in prices.json, not a quality claim. Low end is $0 for every "
+         "candidate. The figure shown is the high end: the route's window spend re-priced at the candidate's list prices (same tokens, "
+         "same cached and uncached split; cached tokens at the input rate for a provider whose cache terms are unverified), x 30/%.1f "
+         "days, if the whole route were switched. **Nothing here is in the action table, the totals or the headline, which are the "
+         "same under --scope stay.** The candidate list is limited to the models priced in prices.json (dated %s): a cheaper model "
+         "that is not in the file is not shown. A route needs %d priced calls before candidates are listed." % (ctx.days, ctx.prices.get("_date", "unknown"), OPEN_MIN_CALLS), "",
+         "- **The candidates in each route are alternatives: pick at most one; their figures do not add.**",
+         "- **Token counts differ between providers' tokenizers; re-pricing uses this export's token counts, so a real bill can differ.**", ""]
     recs = open_candidates(ctx)
     shown = 0
     for rec in recs:
@@ -885,16 +915,33 @@ def open_section(ctx):
             vendor = ("%s is already in this export (a key may exist); this route's data would go there too"
                       % c["provider"] if c["known_vendor"] else
                       "new vendor and key (%s); this route's data goes to a provider not in this export" % c["provider"])
-            rows.append([c["model"], c["provider"], c["cls"], usd(c["repriced"]) + (" (all calls, as a gate)" if c["kind"] == "gate" else ""),
-                         "$0-%s%s" % (usd(net * ctx.k), " net of gate" if c["kind"] == "gate" else ""), vendor + "; TTFT and region differ"])
+            gp = getattr(ctx, "gate_pass", None)
             if c["kind"] == "gate":
-                extra.append("Net of the gate (assumption A2: the gate cannot decide %.0f%% of calls and passes them on to %s): "
-                             "%s of %s calls no longer reach %s = %s; the gate's own %s calls at %s list prices cost %s; net = %s - %s = %s in the window%s."
-                             % (100 * GATE_ESCALATE_SHARE, rec["model"], num(round((1 - GATE_ESCALATE_SHARE) * rec["n"])), num(rec["n"]),
-                                rec["model"], usd(c["gross"]), num(rec["n"]), c["model"], usd(c["added"]), usd(c["gross"]), usd(c["added"]),
-                                usd(c["net"]) if c["net"] > 0 else "$0.00",
-                                "" if c["net"] > 0 else " (the gate costs more than it saves)"))
-        L += table(["candidate", "provider", "class", "route spend at list price", "monthly range", "switching cost"], rows)
+                fig = "up to %s net of gate (%s)" % (usd(net * ctx.k), "ceiling: assumes the gate decides every call" if gp is None
+                                                    else "at your %s pass-through" % pct_share(gp))
+            else:
+                fig = "up to %s" % usd(net * ctx.k)
+            rows.append([c["model"], c["provider"], c["cls"], usd(c["repriced"]) + (" (all calls, as a gate)" if c["kind"] == "gate" else ""),
+                         fig, vendor + "; TTFT and region differ"])
+            if c["kind"] == "gate":
+                be = c["breakeven"]
+                if gp is None:
+                    extra.append("Gate ceiling (not an estimate): this assumes the gate decides every call, so no call reaches %s and its whole "
+                                 "%s of window spend is saved; the gate's own %s at %s list prices cost %s; net = %s - %s = %s in the window. "
+                                 "**Break-even pass-through share: %s**: if the gate cannot decide that share of calls or more (they go on to %s "
+                                 "anyway), the net saving is zero. Replay 100-200 logged calls on the gate to measure your share, then rerun with "
+                                 "`--gate-pass-through FRACTION`."
+                                 % (rec["model"], usd(c["gross"]), pl(rec["n"], "call"), c["model"], usd(c["added"]),
+                                    usd(c["gross"]), usd(c["added"]), usd(c["net"]) if c["net"] > 0 else "$0.00", pct_share(be), rec["model"]))
+                else:
+                    extra.append("Net of the gate at your measured pass-through of %s (the share of calls the gate cannot decide, which go on to %s): "
+                                 "%s of %s no longer reach %s = %s; the gate's own %s at %s list prices cost %s; net = %s - %s = %s in the window%s. "
+                                 "Break-even pass-through share: %s."
+                                 % (pct_share(gp), rec["model"], num(round((1 - gp) * rec["n"])), pl(rec["n"], "call"), rec["model"],
+                                    usd(c["gross"]), pl(rec["n"], "call"), c["model"], usd(c["added"]), usd(c["gross"]), usd(c["added"]),
+                                    usd(c["net"]) if c["net"] > 0 else "$0.00",
+                                    "" if c["net"] > 0 else " (the gate costs more than it saves)", pct_share(be)))
+        L += table(["candidate", "provider", "class", "route spend at list price", "if fully switched (monthly, high end)", "switching cost"], rows)
         L += [""] + ["- " + e for e in extra]
         if rec["dshape"]:
             L.append("- **Eval:** replay 100-200 logged calls of this route on the candidate and compare its verdict with the logged verdict by "
@@ -913,15 +960,18 @@ def tool_section(ctx):
     if not ctx.tool_cols:
         return []
     L = ["## Unused tool schemas (MEASURED dollars; the action is a HYPOTHESIS)", ""]
+    thin = (" %s not judged: under %d calls that carry a schema and a tool-call count." % (pl(ctx.tool_thin, "route"), TOOL_MIN_CALLS)
+            if ctx.tool_thin else "")
     if not ctx.tool_findings:
-        return L + ["%s checked (tool_schema_tokens and tool_calls logged); none sends tool definitions it never calls on %.0f%% of its calls "
-                    "across %d or more sessions." % (pl(ctx.tool_checked, "route"), 100 * TOOL_UNUSED_SHARE, TOOL_MIN_SESSIONS), ""]
-    L += ["Tool definitions are in the request on every call; on these routes the response called no tool on at least %.0f%% of the calls "
-          "that carry a schema, across %d or more sessions (when session_id is logged). The dollars are tokens in the schema x the unused "
+        return L + ["%s checked (tool_schema_tokens and tool_calls logged, at least %d calls each); none sends tool definitions it never calls on "
+                    "%.0f%% of the calls that carry a schema, across %d or more sessions.%s"
+                    % (pl(ctx.tool_checked, "route"), TOOL_MIN_CALLS, 100 * TOOL_UNUSED_SHARE, TOOL_MIN_SESSIONS, thin), ""]
+    L += ["A route is judged on the calls that carry a tool schema and a tool-call count (at least %d of them); on these routes the response "
+          "called no tool on at least %.0f%% of those calls, across %d or more sessions (when session_id is logged).%s The dollars are tokens in the schema x the unused "
           "calls x the rate those tokens were billed at: the cached rate on a call whose cached tokens cover the schema, otherwise the "
           "uncached input rate (assumption: the schema is billed as plain input; a cache write would cost more). They are what the schemas "
           "cost, not a saving: removing a tool may change the model's behaviour, so the action is a HYPOTHESIS. Not in the action table or the "
-          "totals (it overlaps caching and trimming)." % (100 * TOOL_UNUSED_SHARE, TOOL_MIN_SESSIONS), ""]
+          "totals (it overlaps caching and trimming)." % (TOOL_MIN_CALLS, 100 * TOOL_UNUSED_SHARE, TOOL_MIN_SESSIONS, thin), ""]
     rows = []
     for f in ctx.tool_findings:
         ev = "n=%s calls, %s" % (num(f["n"]), pl(len(f["sess"]), "session") if f["sess_known"] else "sessions not logged")
@@ -943,9 +993,13 @@ def spiral_section(ctx):
         return L + ["The export has no success column, so failed calls cannot be counted and no spiral is judged.", ""]
     L += ["A spiral is a task (calls sharing a task_id on one route) whose calls or tokens exceed %.1fx its route's median task and that has at "
           "least %d failed calls. A route needs %d tasks before it is judged. The spend is read from the export; it overlaps the failed-call "
-          "step and is in no total. A spiral can be a hard task rather than a bug: read a few before fixing." % (SPIRAL_FACTOR, SPIRAL_MIN_FAILED, SPIRAL_MIN_TASKS), ""]
+          "step and is in no total. On a route whose median task is 1 call, a spiral task also needs at least %d calls. A spiral can be a "
+          "hard task rather than a bug: read a few before fixing."
+          % (SPIRAL_FACTOR, SPIRAL_MIN_FAILED, SPIRAL_MIN_TASKS, SPIRAL_MIN_CALLS_WHEN_MEDIAN_ONE), ""]
     rows = []
     for r in ctx.spiral_rows:
+        if not r["n"]:
+            continue
         ev = "n=%s tasks" % num(r["tasks"])
         if r["sess"]:
             ev += ", %s" % pl(len(r["sess"]), "session")
@@ -958,6 +1012,8 @@ def spiral_section(ctx):
     if rows:
         L += table(["where", "evidence", "median task", "spiral tasks", "spend in spirals", "confidence"], rows)
         L.append("")
+    elif ctx.spiral_rows:
+        L += ["%s judged; no task met the spiral rule." % pl(len(ctx.spiral_rows), "route"), ""]
     if ctx.spiral_thin:
         L.append("Not enough tasks (under %d, so no spiral is judged): %s." % (SPIRAL_MIN_TASKS, ", ".join(
             "%s (%s)" % (r, pl(n, "task")) for r, n in sorted(ctx.spiral_thin)[:6])))
@@ -1079,9 +1135,9 @@ def step_trimming(ctx, st, level):
         p[3] += a
     for route, p in sorted(per.items(), key=lambda kv: kv[1][3] - kv[1][2])[:3]:
         acc.lines.append(
-            "High end, %s: %s calls in %s sessions carry %s tokens above the first call of their session (input of call k "
+            "High end, %s: %s in %s carry %s tokens above the first call of their session (input of call k "
             "minus input of call 1). Removing them at the input rates of each call: %s -> %s, saving %s in the window, %s a month."
-            % (route, num(p[0]), num(len(ctx.excess_sessions[route])), num(p[1]), usd(p[2]), usd(p[3]),
+            % (route, pl(p[0], "call"), pl(len(ctx.excess_sessions[route]), "session"), num(p[1]), usd(p[2]), usd(p[3]),
                usd(p[2] - p[3]), mo(ctx, p[2] - p[3])))
     return acc
 
@@ -1182,9 +1238,10 @@ def step_caps(ctx, st, level):
     for (model, route), p in sorted(per.items(), key=lambda kv: -kv[1][2])[:3]:
         rate = ctx.prices["models"][model]["output"]
         acc.lines.append(
-            "High end, %s on %s: p95 output is %s tokens (n=%s calls). %s calls are above it and emit %s tokens over the cap, "
+            "High end, %s on %s: p95 output is %s tokens (n=%s calls). %s %s above it and emit %s tokens over the cap, "
             "x %s per 1M = %s in the window, %s a month."
-            % (model, route, num(ctx.caps[(model, route)]), num(len(ctx.by_mr[(model, route)])), num(p[0]), num(p[1]),
+            % (model, route, num(ctx.caps[(model, route)]), num(len(ctx.by_mr[(model, route)])), pl(p[0], "call"),
+               "is" if p[0] == 1 else "are", num(p[1]),
                price(rate), usd(p[2]), mo(ctx, p[2])))
     return acc
 
@@ -1208,9 +1265,9 @@ def step_batching(ctx, st, level):
         p[3] = disc
     for (route, disc), p in sorted(per.items(), key=lambda kv: -kv[1][2])[:3]:
         acc.lines.append(
-            "High end, %s: %s calls are not streamed and the route has no TTFT. They cost %s at the current rates; at a "
+            "High end, %s: %s %s not streamed and the route has no TTFT. %s %s at the current rates; at a "
             "%.0f%% batch discount: %s x %.2f = %s saved in the window, %s a month."
-            % (route, num(p[0]), usd(p[1]), 100 * disc, usd(p[1]), disc, usd(p[2]), mo(ctx, p[2])))
+            % (route, pl(p[0], "call"), "is" if p[0] == 1 else "are", "It costs" if p[0] == 1 else "They cost", usd(p[1]), 100 * disc, usd(p[1]), disc, usd(p[2]), mo(ctx, p[2])))
     return acc
 
 
@@ -1264,9 +1321,12 @@ def waterfall(ctx, steps):
 
 
 # ---------------------------------------------------------------- analysis
-def analyze(parsed, prices, ttft_budget=None, view="auto", window_days=None, scope="stay"):
+def analyze(parsed, prices, ttft_budget=None, view="auto", window_days=None, scope="stay", gate_pass_through=None):
+    if gate_pass_through is not None and not 0.0 <= gate_pass_through <= 1.0:
+        raise ValueError("gate_pass_through must be a fraction between 0 and 1")
     ctx = build_ctx(parsed, prices, window_days)
     ctx.budget, ctx.view, ctx.scope = ttft_budget, view, scope
+    ctx.gate_pass = gate_pass_through
     ctx.not_estimated = []
     active = []
     for s in STEPS:
@@ -1579,7 +1639,7 @@ def scan_only_section(ctx):
             um = ctx.um_by_route.get(rid, 0)
             items.append("%s (live: %s): no priced rows in the export%s."
                          % (rid, "yes" if r.get("live") is True else "unknown",
-                            "; %s calls were seen with no token usage logged, so its cost is unknown" % num(um) if um
+                            "; %s no token usage logged, so its cost is unknown" % ("%s %s seen with" % (pl(um, "call"), "was" if um == 1 else "were")) if um
                             else "; its calls are not in the logs or carry no usage, so its cost is unknown"))
     if test_only:
         items.append("%s test-only route%s with no rows (not live): %s." % (num(len(test_only)), "s" if len(test_only) != 1 else "",
@@ -1602,10 +1662,10 @@ def logged_cost_line(ctx):
     for c in vals:
         by[c.route].append(c.logged)
     cum = sorted(r for r, v in by.items() if len(v) >= CUMULATIVE_MIN and _looks_cumulative(v))
-    s = ("- **Logged cost check:** logged_cost_usd sums to %s on %s rows; the same rows price at %s here (logged / priced = %s). "
+    s = ("- **Logged cost check:** logged_cost_usd sums to %s on %s; the same rows price at %s here (logged / priced = %s). "
          "Warning: a logged cost may be cumulative per process or session, in which case the logged sum overstates; compare per-call "
          "values before trusting it. This report uses the priced figure only."
-         % (usd(lsum), num(len(vals)), usd(psum), ("%.2fx" % (lsum / psum)) if psum > 0 else "n/a"))
+         % (usd(lsum), pl(len(vals), "row"), usd(psum), ("%.2fx" % (lsum / psum)) if psum > 0 else "n/a"))
     if cum:
         s += " Logged cost rises call after call on %s, which looks cumulative." % ", ".join(cum[:3])
     return s
@@ -1663,8 +1723,8 @@ def render(ctx):
     win = ("%s to %s UTC" % (datetime.fromtimestamp(ctx.start, timezone.utc).strftime("%Y-%m-%d %H:%M"),
                              datetime.fromtimestamp(ctx.end, timezone.utc).strftime("%Y-%m-%d %H:%M"))) if ctx.start else "no timestamps"
     L.append(scope_line(ctx))
-    L.append("- **Window:** %.1f days (%s), %s calls, %s priced spend; about %s a month if the window is typical (%s x 30 / %.1f days)."
-             % (ctx.days, win, num(n), usd(ctx.spend), usd(ctx.monthly), usd(ctx.spend), ctx.days))
+    L.append("- **Window:** %.1f days (%s), %s, %s priced spend; about %s a month if the window is typical (%s x 30 / %.1f days)."
+             % (ctx.days, win, pl(n, "call"), usd(ctx.spend), usd(ctx.monthly), usd(ctx.spend), ctx.days))
     if ctx.days < 7 or ctx.window_assumed:
         L.append("- **Warning:** %s Monthly figures are less reliable."
                  % ("no usable timestamps, so the window is assumed to be 30 days." if ctx.window_assumed
@@ -1719,17 +1779,17 @@ def render(ctx):
     else:
         L.append("- **Do first:** no action clears $0 on this data.")
     drop = sum(ctx.dropped.values())
-    L.append("- **Data:** %s rows read, %s dropped, %s on unpriced models%s%s; prices dated %s. The monthly ranges in the action table are "
+    L.append("- **Data:** %s read, %s dropped, %s on unpriced models%s%s; prices dated %s. The monthly ranges in the action table are "
              "de-duplicated and add up to the figures above."
-             % (num(ctx.n_read), num(drop), num(ctx.unpriced_rows),
+             % (pl(ctx.n_read, "row"), num(drop), num(ctx.unpriced_rows),
                 " (" + ", ".join(sorted(ctx.unpriced)) + ")" if ctx.unpriced else "",
                 ", %s flagged usage_missing (no token usage, not priced)" % num(len(ctx.usage_missing)) if ctx.usage_missing else "",
                 ctx.prices.get("_date", "unknown")))
     L.append("")
 
     # ---- action table
-    L.append("## %s actions are worth %s a month after de-duplication%s"
-             % (len(ctx.ranked), rng(ctx.low_total, ctx.high_total),
+    L.append("## %s %s worth %s a month after de-duplication%s"
+             % (len(ctx.ranked), "action is" if len(ctx.ranked) == 1 else "actions are", rng(ctx.low_total, ctx.high_total),
                 "; first: %s" % ctx.ranked[0]["step"]["name"].lower() if ctx.ranked else ""))
     L.append("")
     if ctx.ranked:
@@ -1807,7 +1867,8 @@ def render(ctx):
     L.append("")
 
     # ---- cards
-    L.append("## The %s opportunities in detail: what we saw, what it is worth, how to check, what would prove it wrong" % len(ctx.ranked))
+    L.append("## The %s in detail: what we saw, what it is worth, how to check, what would prove it wrong"
+             % pl(len(ctx.ranked), "opportunity", "opportunities"))
     for rank, r in enumerate(ctx.ranked, 1):
         s = r["step"]
         a = r["acc_high"]
@@ -1890,21 +1951,28 @@ def render(ctx):
         L.append("- **Success.** The export has no success column, so no cost per successful task and no failed-call waste figure.")
     L.append("- **Scope.** `--scope stay` (default) keeps every action inside the providers in the export. `--scope open` adds the \"Other "
              "providers\" section: candidates from prices.json by `class`, at list price, always HYPOTHESIS with a $0 low end, outside every "
-             "total. A route's spend there is re-priced token for token; a candidate that adds calls (a decision-model gate) is shown net of "
-             "those calls, priced from prices.json (A2: the gate passes %d%% of calls on to the current model)." % int(100 * GATE_ESCALATE_SHARE))
+             "total. `class` is a hand-set price band in prices.json (decision, small, mid, frontier), not a quality claim. A route's spend there "
+             "is re-priced token for token with this export's token counts (providers' tokenizers differ, so a real bill can differ); cached "
+             "tokens are priced at the input rate for a provider whose cache terms are unverified. A route needs %d priced calls before candidates "
+             "are listed. The candidates in one route are alternatives, not additions. A candidate that adds calls (a decision-model gate) is "
+             "shown net of those calls, priced from prices.json. The share of calls the gate cannot decide (they go on to the current model) is "
+             "yours to measure: pass it as `--gate-pass-through FRACTION`. Without it the gate figure is the ceiling that assumes the gate "
+             "decides every call, printed with the break-even pass-through share (the share at which the net saving is zero)." % OPEN_MIN_CALLS)
     L.append("- **Evidence.** A finding whose calls carry session_id and span fewer than %d sessions is marked low evidence. Calls with no "
              "session_id leave the session count unknown, which is not marked." % LOW_EVIDENCE_SESSIONS)
     if ctx.tool_cols or ctx.spiral_rows or ctx.spiral_thin:
         L.append("- **Tool schemas and spirals.** Both are MEASURED spend, outside the waterfall and the totals. Tool-schema dollars use the cached "
-                 "rate when the call's cached tokens cover the schema and the uncached input rate otherwise; a spiral is a task above %.1fx its "
-                 "route's median calls or tokens with %d or more failed calls (routes with under %d tasks are not judged)."
-                 % (SPIRAL_FACTOR, SPIRAL_MIN_FAILED, SPIRAL_MIN_TASKS))
+                 "rate when the call's cached tokens cover the schema and the uncached input rate otherwise, and a route needs %d calls that carry "
+                 "a schema and a tool-call count; a spiral is a task above %.1fx its route's median calls or tokens with %d or more failed calls "
+                 "(routes with under %d tasks are not judged; on a route whose median task is 1 call, a spiral task needs %d or more calls)."
+                 % (TOOL_MIN_CALLS, SPIRAL_FACTOR, SPIRAL_MIN_FAILED, SPIRAL_MIN_TASKS, SPIRAL_MIN_CALLS_WHEN_MEDIAN_ONE))
     L.append("- **Limits.** No p95 is printed for groups under %d calls; no caching dollars without a prefix_hash column; routing only goes to the same "
              "provider's next tier down (the lowest input price among models sharing that tier); a provider marked cache_mode implicit in "
              "prices.json caches by itself, so no prompt-caching action is recommended for its routes; calls on unpriced models are excluded from every figure." % MIN_P95)
     drops = ", ".join("%s: %s" % (k, num(v)) for k, v in sorted(ctx.dropped.items())) or "none"
-    L.append("- **Data quality.** %s rows read; %s dropped (%s); %s rows on unpriced models; %s priced rows have no usable timestamp."
-             % (num(ctx.n_read), num(drop), drops, num(ctx.unpriced_rows), num(ctx.no_ts_rows)))
+    L.append("- **Data quality.** %s read; %s dropped (%s); %s on unpriced models; %s no usable timestamp."
+             % (pl(ctx.n_read, "row"), num(drop), drops, pl(ctx.unpriced_rows, "row"),
+                "1 priced row has" if ctx.no_ts_rows == 1 else "%s priced rows have" % num(ctx.no_ts_rows)))
     if ctx.usage_missing:
         L.append("- **Usage missing.** %s on %s flagged usage_missing: counted, not priced, so spend is a floor."
                  % (pl(len(ctx.usage_missing), "call"), pl(len(ctx.um_by_route), "route")))
@@ -1912,9 +1980,9 @@ def render(ctx):
         L.append("- **Stateless routes.** Calls flagged stateless are skipped by the trimming and session-growth steps and by session views: "
                  "each call stands alone, so a later call carries no history to cut.")
     if ctx.struct_hash_rows:
-        L.append("- **Prefix hash.** %s rows carry a structural prefix_hash (route, model and process generation), not a hash of the prompt text. "
+        L.append("- **Prefix hash.** %s a structural prefix_hash (route, model and process generation), not a hash of the prompt text. "
                  "The caching figure assumes the prefix is stable across calls with the same hash; billed cache reads are the check."
-                 % num(ctx.struct_hash_rows))
+                 % ("1 row carries" if ctx.struct_hash_rows == 1 else "%s rows carry" % num(ctx.struct_hash_rows)))
     if ctx.ptoks_estimated:
         L.append("- **Prefix size.** No prefix_tokens for some prefixes; their size is the smallest input seen on that prefix, which can overstate it.")
     L.append("")
@@ -1962,29 +2030,38 @@ def _saw(ctx, r):
     n = len(calls)
     base = "It touches n=%s calls, %s of window spend (%s), on %s." % (num(a.n), share(a.spend, ctx.spend), usd(a.spend), top_routes(a.by_route))
     if key == "failed":
-        return ("%s of %s calls failed (%s of calls); %s of the failures were retried. Failed calls cost %s (%s of spend). The %s tasks "
-                "that ended in a failed last call cost %s in total (%s of spend)."
-                % (num(len(ctx.failed)), num(n), share(len(ctx.failed), n), num(len(ctx.retried)), usd(ctx.failed_spend),
-                   share(ctx.failed_spend, ctx.spend), num(len(ctx.failed_tasks)), usd(ctx.failed_task_spend),
-                   share(ctx.failed_task_spend, ctx.spend)))
+        nf, nt = len(ctx.failed), len(ctx.failed_tasks)
+        return ("%s of %s failed (%s of calls); %s of the failures %s retried. Failed calls cost %s (%s of spend). %s "
+                "that ended in a failed last call %s %s in total (%s of spend)."
+                % (num(nf), pl(n, "call"), share(nf, n), num(len(ctx.retried)), "was" if len(ctx.retried) == 1 else "were",
+                   usd(ctx.failed_spend), share(ctx.failed_spend, ctx.spend),
+                   "The task" if nt == 1 else "The %s tasks" % num(nt), "costs" if nt == 1 else "cost",
+                   usd(ctx.failed_task_spend), share(ctx.failed_task_spend, ctx.spend)))
     if key == "caching":
         reps = sum(max(0, len(g) - 1) for g in ctx.cache_groups.values())
         c0 = sum(1 for c in calls if c.cached > 0)
-        return ("%s prefixes (by prefix_hash and provider) account for %s repeat calls; %s of calls already carry cached tokens (n=%s calls). %s%s"
-                % (num(len(ctx.cache_groups)), num(reps), share(c0, n), num(n), base,
-                   " %s rows use a structural prefix_hash, not a hash of prompt text." % num(ctx.struct_hash_rows)
+        npf = len(ctx.cache_groups)
+        return ("%s (by prefix_hash and provider) %s for %s; %s of calls already carry cached tokens (n=%s calls). %s%s"
+                % (pl(npf, "prefix", "prefixes"), "accounts" if npf == 1 else "account", pl(reps, "repeat call"), share(c0, n), num(n), base,
+                   " %s a structural prefix_hash, not a hash of prompt text." % (
+                       "1 row uses" if ctx.struct_hash_rows == 1 else "%s rows use" % num(ctx.struct_hash_rows))
                    if ctx.struct_hash_rows else ""))
     if key == "trimming":
-        return ("%s calls (%s of calls) sit in sessions whose input grows beyond the first call. %s"
-                % (num(len(ctx.excess)), share(len(ctx.excess), n), base))
+        ne = len(ctx.excess)
+        return ("%s (%s of calls) %s in sessions whose input grows beyond the first call. %s"
+                % (pl(ne, "call"), share(ne, n), "sits" if ne == 1 else "sit", base))
     if key == "routing":
-        return ("%s calls (%s of calls) meet the easy-call rule on %s model-and-route groups with 200+ calls. %s"
-                % (num(len(ctx.route_cand)), share(len(ctx.route_cand), n), len(ctx.route_def), base))
+        nc, ng = len(ctx.route_cand), len(ctx.route_def)
+        return ("%s (%s of calls) %s the easy-call rule on %s with 200+ calls. %s"
+                % (pl(nc, "call"), share(nc, n), "meets" if nc == 1 else "meet", pl(ng, "model-and-route group"), base))
     if key == "caps":
-        return "%s model-and-route groups have 200+ calls; only calls above their own p95 output are touched. %s" % (len(ctx.caps), base)
+        ng = len(ctx.caps)
+        return "%s 200+ calls; only calls above their own p95 output are touched. %s" % (
+            "%s has" % pl(ng, "model-and-route group") if ng == 1 else "%s have" % pl(ng, "model-and-route group"), base)
     if key == "batching":
-        return ("%s calls (%s of calls) are not streamed and sit on routes with no TTFT. %s"
-                % (num(len(ctx.batch_cand)), share(len(ctx.batch_cand), n), base))
+        nb = len(ctx.batch_cand)
+        return ("%s (%s of calls) %s not streamed and %s on routes with no TTFT. %s"
+                % (pl(nb, "call"), share(nb, n), "is" if nb == 1 else "are", "sits" if nb == 1 else "sit", base))
     return base
 
 
@@ -2050,11 +2127,16 @@ def main(argv=None):
     ap.add_argument("--routes", help="the scan's routes.json: adds the UNMEASURED scan-only findings section")
     ap.add_argument("--scope", choices=["stay", "open"], default="stay",
                     help="stay (default): stay with the providers in the export; open: also list cheaper models from other providers (HYPOTHESIS)")
+    ap.add_argument("--gate-pass-through", type=float, metavar="FRACTION",
+                    help="open scope: the share (0-1) of calls a decision-model gate cannot decide, measured on your own replay; "
+                         "without it the gate is shown as the ceiling that assumes it decides every call, plus its break-even share")
     args = ap.parse_args(argv)
+    if args.gate_pass_through is not None and not 0.0 <= args.gate_pass_through <= 1.0:
+        ap.error("--gate-pass-through must be a fraction between 0 and 1")
     raw, bad = read_raw(args.export)
     parsed = parse_rows(raw, bad, args.input_excludes_cached)
     prices = load_prices(args.prices)
-    ctx = analyze(parsed, prices, args.ttft_budget_ms, args.view, args.window_days, args.scope)
+    ctx = analyze(parsed, prices, args.ttft_budget_ms, args.view, args.window_days, args.scope, args.gate_pass_through)
     ctx.label = args.label
     if args.routes:
         ctx.routes_doc = load_routes(args.routes)

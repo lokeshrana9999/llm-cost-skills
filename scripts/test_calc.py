@@ -800,6 +800,27 @@ class ReviewFixTests(unittest.TestCase):
         self.assertEqual(calc.price(0.042), "$0.042")
         self.assertEqual(calc.dur_cell([0.0, 0.0]), "n/a")
 
+    def test_generated_text_never_says_one_plural(self):
+        import re
+        bad = re.compile(r"(?<![\d.=,])1 (calls|actions|opportunities|rows|routes|sessions|tasks|prefixes|repeat calls|groups)\b")
+        cases = [simple_rows(1), simple_rows(1) + [dict(model="claude-sonnet-4-5", route="warm", usage_missing="true")],
+                 simple_rows(3, model="gpt-4o"), simple_rows(2, success="false")]
+        for scope in ("stay", "open"):
+            for rows in cases:
+                text = calc.render(run(rows, scope=scope))
+                self.assertIsNone(bad.search(text), bad.search(text) and text[bad.search(text).start() - 40:bad.search(text).end() + 40])
+
+    def test_one_action_and_one_opportunity_are_singular(self):
+        ctx = run(simple_rows(40))                      # only batching clears $0
+        self.assertEqual(len(ctx.ranked), 1)
+        text = calc.render(ctx)
+        self.assertIn("## 1 action is worth", text)
+        self.assertIn("## The 1 opportunity in detail", text)
+        text = calc.render(run(simple_rows(40, success="false")))
+        self.assertIn("## 2 actions are worth", text)
+        self.assertIn("## The 2 opportunities in detail", text)
+        self.assertEqual(calc.pl(1, "opportunity", "opportunities"), "1 opportunity")
+
     def test_floor_line_says_1_route_and_1_call(self):
         rows = [dict(r) for r in make_rows(n_voice=250, n_chat=0, n_small=0)]
         rows.append(dict(model="claude-sonnet-4-5", route="warm", usage_missing="true"))
@@ -850,6 +871,15 @@ class PriceClassTests(unittest.TestCase):
         for name in ("gpt-5-mini", "gpt-5-nano", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-decision-1"):
             self.assertIn("https://", PRICES["models"][name]["_verify"], name)
         self.assertIn("https://", PRICES["providers"]["google"]["_verify"])
+
+    def test_every_model_and_provider_cites_a_public_pricing_url_and_a_read_date(self):
+        sources = [("model " + n, m["_verify"]) for n, m in PRICES["models"].items()]
+        sources += [("provider " + n, p["_verify"]) for n, p in PRICES["providers"].items()]
+        for what, v in sources:
+            self.assertRegex(v, r"https://\S+", what)
+            self.assertRegex(v, r"(read|checked) \d{4}-\d{2}-\d{2}", what)
+        self.assertIn("platform.claude.com/docs/en/about-claude/pricing", PRICES["providers"]["anthropic"]["_verify"])
+        self.assertIn("developers.openai.com/api/docs/pricing", PRICES["providers"]["openai"]["_verify"])
 
     def test_new_rows_do_not_change_same_provider_routing(self):
         self.assertEqual(calc.next_tier_down(PRICES, "gpt-4o"), "gpt-4o-mini")
@@ -907,7 +937,7 @@ class OpenCandidateTests(unittest.TestCase):
         return ctx, dict((r["route"], r) for r in calc.open_candidates(ctx))
 
     def test_other_providers_only_same_or_one_lower_class_cheaper_at_most_three(self):
-        ctx, rec = self.cands(simple_rows(60, model="claude-sonnet-4-5"))      # mid, anthropic
+        ctx, rec = self.cands(simple_rows(200, model="claude-sonnet-4-5"))      # mid, anthropic
         r = rec["r"]
         self.assertLessEqual(len(r["cands"]), calc.OPEN_MAX_CANDIDATES)
         self.assertTrue(r["cands"])
@@ -915,39 +945,82 @@ class OpenCandidateTests(unittest.TestCase):
             self.assertNotEqual(c["provider"], "anthropic")
             self.assertIn(c["cls"], ("mid", "small"))
             self.assertLess(c["repriced"], r["spend"])
-        order = [c["repriced"] for c in r["cands"]]
-        self.assertEqual(order, sorted(order))
+        # same class as the route first, then by repriced spend
+        keys = [(0 if c["cls"] == "mid" else 1, c["repriced"]) for c in r["cands"]]
+        self.assertEqual(keys, sorted(keys))
+        self.assertEqual(r["cands"][0]["cls"], "mid")
+
+    def test_candidates_need_200_priced_calls(self):
+        _, rec = self.cands(simple_rows(199, model="claude-sonnet-4-5"))
+        self.assertEqual(rec["r"]["cands"], [])
+        self.assertEqual(rec["r"]["note"], "not enough calls to judge (n=199, under 200).")
+        _, rec = self.cands(simple_rows(200, model="claude-sonnet-4-5"))
+        self.assertTrue(rec["r"]["cands"])
+        text = calc.render(run(simple_rows(150, model="claude-sonnet-4-5"), scope="open"))
+        self.assertIn("not enough calls to judge (n=150, under 200)", section(text, "Other providers"))
+        self.assertNotIn("| candidate |", section(text, "Other providers"))
+
+    def test_same_class_comes_before_a_cheaper_lower_class(self):
+        _, rec = self.cands(simple_rows(200, model="claude-sonnet-4-5"))
+        cands = rec["r"]["cands"]
+        mids = [c for c in cands if c["cls"] == "mid"]
+        smalls = [c for c in cands if c["cls"] == "small"]
+        self.assertTrue(mids and smalls)
+        self.assertLess(cands.index(mids[0]), cands.index(smalls[0]))
+        self.assertGreater(mids[0]["repriced"], smalls[0]["repriced"])      # the mid is dearer but still listed first
 
     def test_frontier_route_gets_mid_class_but_not_small(self):
-        _, rec = self.cands(simple_rows(60, model="claude-opus-5-5"))
+        _, rec = self.cands(simple_rows(200, model="claude-opus-5-5"))
         classes = set(c["cls"] for c in rec["r"]["cands"])
         self.assertTrue(classes)
         self.assertLessEqual(classes, {"frontier", "mid"})
 
     def test_repriced_spend_is_list_price_token_for_token(self):
-        _, rec = self.cands(simple_rows(60, model="claude-sonnet-4-5", inp=1000, out=100))
+        _, rec = self.cands(simple_rows(200, model="claude-sonnet-4-5", inp=1000, out=100))
         c = [x for x in rec["r"]["cands"] if x["model"] == "gpt-5-nano"]
         self.assertTrue(c)
-        self.assertAlmostEqual(c[0]["repriced"], 60 * (1000 * 0.05 + 100 * 0.40) / 1e6, places=9)
+        self.assertAlmostEqual(c[0]["repriced"], 200 * (1000 * 0.05 + 100 * 0.40) / 1e6, places=9)
         self.assertAlmostEqual(c[0]["net"], rec["r"]["spend"] - c[0]["repriced"], places=9)
         self.assertEqual(c[0]["added"], 0.0)
 
     def test_repricing_uses_cached_and_write_rates(self):
-        rows = simple_rows(60, model="claude-sonnet-4-5", inp=1000, out=100, cached_input_tokens=400, cache_write_tokens=100)
+        rows = simple_rows(200, model="claude-sonnet-4-5", inp=1000, out=100, cached_input_tokens=400, cache_write_tokens=100)
         ctx, rec = self.cands(rows)
         c = [x for x in rec["r"]["cands"] if x["model"] == "gpt-5-nano"][0]
-        want = 60 * (500 * 0.05 + 400 * 0.005 + 100 * 0.05 * 1.0 + 100 * 0.40) / 1e6
+        want = 200 * (500 * 0.05 + 400 * 0.005 + 100 * 0.05 * 1.0 + 100 * 0.40) / 1e6
         self.assertAlmostEqual(c["repriced"], want, places=9)
 
+    def test_unverified_cache_provider_gets_cached_tokens_at_the_input_rate(self):
+        import copy
+        self.assertIs(calc.provider_terms(PRICES, "google")["cache_verified"], False)
+        self.assertIs(calc.provider_terms(PRICES, "openai")["cache_verified"], True)
+        rows = simple_rows(200, model="claude-sonnet-4-5", inp=1000, out=100, cached_input_tokens=400)
+        ctx = calc.analyze(calc.parse_rows(rows), PRICES, scope="open")
+        idxs = ctx.by_route["r"]
+        g = calc.reprice(ctx, idxs, "gemini-3.1-flash-lite")
+        self.assertAlmostEqual(g, 200 * (1000 * 0.25 + 100 * 1.50) / 1e6, places=9)       # cached 400 at 0.25, not 0.025
+        o = calc.reprice(ctx, idxs, "gpt-5-nano")
+        self.assertAlmostEqual(o, 200 * (600 * 0.05 + 400 * 0.005 + 100 * 0.40) / 1e6, places=9)
+        p = copy.deepcopy(PRICES)
+        p["providers"]["google"]["cache_terms_verified"] = True
+        ctx2 = calc.analyze(calc.parse_rows(rows), p, scope="open")
+        self.assertAlmostEqual(calc.reprice(ctx2, ctx2.by_route["r"], "gemini-3.1-flash-lite"),
+                               200 * (600 * 0.25 + 400 * 0.025 + 100 * 1.50) / 1e6, places=9)
+
     def test_nothing_cheaper_means_no_candidates(self):
-        _, rec = self.cands(simple_rows(60, model="gpt-5-nano"))
+        _, rec = self.cands(simple_rows(200, model="gpt-5-nano"))
         self.assertEqual(rec["r"]["cands"], [])
 
     def test_section_states_hypothesis_zero_floor_switching_cost_and_eval(self):
-        text = calc.render(run(simple_rows(60, model="claude-sonnet-4-5"), scope="open"))
+        text = calc.render(run(simple_rows(200, model="claude-sonnet-4-5"), scope="open"))
         sec = section(text, "Other providers")
         self.assertIn("HYPOTHESIS", sec)
-        self.assertIn("$0-$", sec)
+        self.assertIn("| if fully switched (monthly, high end) |", sec)
+        self.assertNotIn("monthly range", sec)
+        self.assertIn("up to $", sec)
+        self.assertIn("The candidates in each route are alternatives: pick at most one; their figures do not add.", sec)
+        self.assertIn("Token counts differ between providers' tokenizers; re-pricing uses this export's token counts, so a real bill can differ.", sec)
+        self.assertIn("hand-set price band", sec)
         self.assertIn("new vendor and key", sec)
         self.assertIn("goes to a provider not in this export", sec)
         self.assertIn("replay 100-200 logged calls of this route", sec)
@@ -955,7 +1028,7 @@ class OpenCandidateTests(unittest.TestCase):
         self.assertIn("same under --scope stay", sec)
 
     def test_vendor_already_in_the_export_is_said_so(self):
-        rows = simple_rows(60, model="claude-sonnet-4-5") + simple_rows(60, route="o", model="gpt-4o")
+        rows = simple_rows(200, model="claude-sonnet-4-5") + simple_rows(200, route="o", model="gpt-4o")
         text = calc.render(run(rows, scope="open"))
         self.assertIn("openai is already in this export", text)
 
@@ -971,7 +1044,7 @@ class DecisionShapedTests(unittest.TestCase):
         self.assertTrue(self.ctx_for(simple_rows(50, model="gpt-4o", out=5)) and
                         calc.decision_shaped(self.ctx_for(simple_rows(50, model="gpt-4o", out=5)), "r"))
         self.assertFalse(calc.decision_shaped(self.ctx_for(simple_rows(49, model="gpt-4o", out=2)), "r"))
-        self.assertFalse(calc.decision_shaped(self.ctx_for(simple_rows(60, model="gpt-4o", out=6)), "r"))
+        self.assertFalse(calc.decision_shaped(self.ctx_for(simple_rows(200, model="gpt-4o", out=6)), "r"))
 
     def test_routes_json_flag_marks_a_small_route(self):
         ctx = self.ctx_for(simple_rows(10, model="gpt-4o", out=200))
@@ -980,24 +1053,81 @@ class DecisionShapedTests(unittest.TestCase):
         self.assertTrue(calc.decision_shaped(ctx, "r"))
 
     def test_cheapest_priced_decision_model_is_first_candidate_net_of_gate(self):
-        ctx = self.ctx_for(simple_rows(60, model="gpt-4o", inp=1000, out=2))
+        ctx = self.ctx_for(simple_rows(200, model="gpt-4o", inp=1000, out=2))
         rec = [r for r in calc.open_candidates(ctx) if r["route"] == "r"][0]
-        first = rec["cands"][0]
+        first = [c for c in rec["cands"] if c["kind"] == "gate"][0]
         self.assertEqual(first["model"], calc.cheapest_decision_model(PRICES))
         self.assertEqual(first["model"], "jev-1.14.0")
         self.assertEqual(first["kind"], "gate")
         cur = rec["spend"]
-        added = 60 * 1000 * 0.042 / 1e6
+        added = 200 * 1000 * 0.042 / 1e6
         self.assertAlmostEqual(first["added"], added, places=9)
-        self.assertAlmostEqual(first["gross"], (1 - calc.GATE_ESCALATE_SHARE) * cur, places=9)
+        self.assertAlmostEqual(first["gross"], cur, places=9)          # no flag: the 0% pass-through ceiling
         self.assertAlmostEqual(first["net"], first["gross"] - added, places=9)
+        self.assertAlmostEqual(first["breakeven"], 1 - added / cur, places=9)
 
-    def test_report_prints_gross_added_and_net(self):
-        text = calc.render(run(simple_rows(60, model="gpt-4o", inp=1000, out=2), scope="open"))
+    def test_gate_candidate_follows_same_class_candidates(self):
+        ctx = self.ctx_for(simple_rows(200, model="gpt-4o", inp=1000, out=2))
+        rec = [r for r in calc.open_candidates(ctx) if r["route"] == "r"][0]
+        kinds = [c["kind"] for c in rec["cands"]]
+        self.assertIn("gate", kinds)
+        self.assertEqual(rec["cands"][0]["cls"], "mid")
+        self.assertLessEqual(len(rec["cands"]), calc.OPEN_MAX_CANDIDATES)
+
+    def test_report_prints_ceiling_and_break_even_without_the_flag(self):
+        text = calc.render(run(simple_rows(200, model="gpt-4o", inp=1000, out=2), scope="open"))
         sec = section(text, "Other providers")
-        self.assertIn("net of gate", sec)
-        self.assertIn("Net of the gate", sec)
+        self.assertIn("net of gate (ceiling: assumes the gate decides every call)", sec)
+        self.assertIn("Break-even pass-through share: 98.3%", sec)
+        self.assertIn("--gate-pass-through FRACTION", sec)
         self.assertIn("exact match", sec)
+        self.assertNotIn("assumption A2", text)
+        self.assertNotIn("10%", sec)
+
+    def test_gate_pass_through_is_used_when_given(self):
+        rows = simple_rows(200, model="gpt-4o", inp=1000, out=2)
+        ctx = calc.analyze(calc.parse_rows(rows), PRICES, scope="open", gate_pass_through=0.25)
+        rec = [r for r in calc.open_candidates(ctx) if r["route"] == "r"][0]
+        gate = [c for c in rec["cands"] if c["kind"] == "gate"][0]
+        cur = rec["spend"]
+        self.assertAlmostEqual(gate["gross"], 0.75 * cur, places=9)
+        self.assertAlmostEqual(gate["net"], 0.75 * cur - gate["added"], places=9)
+        sec = section(calc.render(ctx), "Other providers")
+        self.assertIn("at your 25.0% pass-through", sec)
+        self.assertIn("measured pass-through of 25.0%", sec)
+        self.assertNotIn("ceiling", sec)
+
+    def test_break_even_is_where_net_saving_is_zero(self):
+        rows = simple_rows(200, model="gpt-4o", inp=1000, out=2)
+        base = calc.analyze(calc.parse_rows(rows), PRICES, scope="open")
+        be = [c for r in calc.open_candidates(base) for c in r["cands"] if c["kind"] == "gate"][0]["breakeven"]
+        ctx = calc.analyze(calc.parse_rows(rows), PRICES, scope="open", gate_pass_through=be)
+        gate = [c for r in calc.open_candidates(ctx) for c in r["cands"] if c["kind"] == "gate"][0]
+        self.assertAlmostEqual(gate["net"], 0.0, places=9)
+        worse = calc.analyze(calc.parse_rows(rows), PRICES, scope="open", gate_pass_through=min(1.0, be + 0.01))
+        gate = [c for r in calc.open_candidates(worse) for c in r["cands"] if c["kind"] == "gate"][0]
+        self.assertLess(gate["net"], 0)
+        self.assertIn("the gate costs more than it saves", calc.render(worse))
+
+    def test_gate_pass_through_must_be_a_fraction(self):
+        rows = calc.parse_rows(simple_rows(5))
+        for bad in (-0.1, 1.5):
+            with self.assertRaises(ValueError):
+                calc.analyze(rows, PRICES, scope="open", gate_pass_through=bad)
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "r.jsonl")
+            with open(src, "w", encoding="utf-8") as f:
+                f.write("\n".join(json.dumps(r) for r in simple_rows(5)) + "\n")
+            with self.assertRaises(SystemExit):
+                calc.main([src, "-o", os.path.join(d, "o.md"), "--scope", "open", "--gate-pass-through", "2"])
+            calc.main([src, "-o", os.path.join(d, "o.md"), "--scope", "open", "--gate-pass-through", "0.4"])
+
+    def test_headline_and_action_table_ignore_the_pass_through(self):
+        rows = simple_rows(200, model="gpt-4o", inp=1000, out=2)
+        a = calc.render(calc.analyze(calc.parse_rows(rows), PRICES, scope="open"))
+        b = calc.render(calc.analyze(calc.parse_rows(rows), PRICES, scope="open", gate_pass_through=0.5))
+        self.assertEqual(line1(a), line1(b))
+        self.assertEqual(action_table(a), action_table(b))
 
     def test_gate_that_costs_more_than_it_saves_shows_zero(self):
         import copy
@@ -1005,18 +1135,18 @@ class DecisionShapedTests(unittest.TestCase):
         p["models"]["dec-x"] = dict(provider="zz", **{"class": "decision", "input": 2.4, "output": 0.0, "cached": 2.4})
         p["models"]["jev-1.14.0"]["class"] = "mid"          # dec-x is now the only decision model
         p["models"]["gemini-decision-1"]["class"] = "mid"
-        rows = simple_rows(60, model="gpt-4o", inp=1000, out=2)
-        ctx = calc.analyze(calc.parse_rows(rows), p, scope="open")
+        rows = simple_rows(200, model="gpt-4o", inp=1000, out=2)
+        ctx = calc.analyze(calc.parse_rows(rows), p, scope="open", gate_pass_through=0.10)
         rec = [r for r in calc.open_candidates(ctx) if r["route"] == "r"][0]
-        gate = rec["cands"][0]
+        gate = [c for c in rec["cands"] if c["kind"] == "gate"][0]
         self.assertEqual(gate["model"], "dec-x")
         self.assertLess(gate["net"], 0)
         text = calc.render(ctx)
         self.assertIn("the gate costs more than it saves", text)
-        self.assertIn("$0-$0.00 net of gate", text)
+        self.assertIn("up to $0.00 net of gate", text)
 
     def test_route_already_on_the_cheapest_decision_model_says_so(self):
-        rows = simple_rows(60, model="jev-1.14.0", inp=500, out=0)
+        rows = simple_rows(200, model="jev-1.14.0", inp=500, out=0)
         ctx = self.ctx_for(rows)
         rec = [r for r in calc.open_candidates(ctx) if r["route"] == "r"][0]
         self.assertEqual(rec["cands"], [])
@@ -1062,6 +1192,23 @@ class ToolSchemaTests(unittest.TestCase):
     def test_threshold_is_ninety_percent_of_schema_carrying_calls(self):
         self.assertEqual(len(run(self.rows(unused=90)).tool_findings), 1)
         self.assertEqual(run(self.rows(unused=89)).tool_findings, [])
+
+    def test_route_needs_50_schema_carrying_calls(self):
+        self.assertEqual(run(self.rows(n=49, unused=49)).tool_findings, [])
+        self.assertEqual(len(run(self.rows(n=50, unused=50)).tool_findings), 1)
+        thin = run(self.rows(n=49, unused=49))
+        self.assertEqual((thin.tool_checked, thin.tool_thin), (0, 1))
+        self.assertIn("1 route not judged: under 50 calls", calc.render(thin))
+        # calls with no schema do not count towards the 50
+        rows = self.rows(n=60, unused=60)
+        for r in rows[:20]:
+            r["tool_schema_tokens"] = 0
+        self.assertEqual(run(rows).tool_findings, [])
+
+    def test_wording_matches_what_is_checked(self):
+        sec = section(calc.render(run(self.rows())), "Unused tool schemas")
+        self.assertNotIn("on every call", sec)
+        self.assertIn("calls that carry a tool schema and a tool-call count (at least 50 of them)", sec)
 
     def test_needs_two_sessions_when_session_ids_exist(self):
         self.assertEqual(run(self.rows(sessions=1)).tool_findings, [])
@@ -1120,6 +1267,37 @@ class SpiralTests(unittest.TestCase):
         self.assertEqual(run(self.rows(failed=1)).spiral_rows[0]["n"], 0)
         self.assertEqual(run(self.rows(spiral_calls=5, failed=3)).spiral_rows[0]["n"], 0)       # 5 calls is not above 2.5 x 2
         self.assertEqual(run(self.rows(spiral_calls=6, failed=2)).spiral_rows[0]["n"], 1)
+
+    def one_call_route(self, loop_calls, failed=2, n_tasks=25):
+        rows, t = [], 1_700_000_000
+        for k in range(n_tasks):
+            t += 30
+            rows.append(dict(timestamp=t, route="gate", model="claude-sonnet-4-5", input_tokens=1000, output_tokens=100,
+                             task_id="t%02d" % k, success="true"))
+        for j in range(loop_calls):
+            t += 30
+            rows.append(dict(timestamp=t, route="gate", model="claude-sonnet-4-5", input_tokens=1000, output_tokens=100,
+                             task_id="loop", success="false" if j < failed else "true"))
+        return rows
+
+    def test_one_call_median_route_needs_four_calls_in_a_spiral_task(self):
+        r = run(self.one_call_route(3)).spiral_rows[0]
+        self.assertEqual(r["med_calls"], 1)
+        self.assertEqual(r["n"], 0)                    # 3 calls is above 2.5 x 1, but not a loop on a one-call route
+        self.assertEqual(run(self.one_call_route(4)).spiral_rows[0]["n"], 1)
+        self.assertEqual(run(self.one_call_route(4, failed=1)).spiral_rows[0]["n"], 0)
+        # the 4-call rule is only for a median of 1: a median-2 route keeps 6 calls
+        self.assertEqual(run(self.rows(spiral_calls=6, failed=2)).spiral_rows[0]["n"], 1)
+        self.assertIn("at least 4 calls", section(calc.render(run(self.one_call_route(4))), "Spirals"))
+
+    def test_zero_spiral_routes_print_no_row(self):
+        ctx = run(self.rows(spiral_calls=5, failed=3))
+        self.assertEqual(ctx.spiral_rows[0]["n"], 0)
+        sec = section(calc.render(ctx), "Spirals")
+        self.assertNotIn("| agent |", sec)
+        self.assertIn("1 route judged; no task met the spiral rule.", sec)
+        sec = section(calc.render(run(self.rows())), "Spirals")
+        self.assertIn("| agent |", sec)
 
     def test_tokens_alone_can_make_a_spiral(self):
         rows = self.rows(spiral_calls=2, failed=2)

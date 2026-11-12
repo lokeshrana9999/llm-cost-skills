@@ -25,7 +25,7 @@ Pass the answer as `--scope`:
 python <pack>/scripts/calc.py work/<repo>/rows.jsonl --routes work/<repo>/routes.json --scope stay -o work/<repo>/report.md
 ```
 
-The headline and the action table are the same under both scopes. `--routes` adds the report's "Scan-only findings" section (usage gaps and routes with no rows, UNMEASURED, no dollars). Other optional flags: `--ttft-budget-ms N` (ask the user for a target if they have one), `--window-days N` (if rows have no timestamps), `--input-excludes-cached` (if the adapter left cache counts out of `input_tokens`), `--label "<text>"`, `--prices <file>`, `--view auto|latency|backoffice|both`. Use `python`, not `python3`. If it exits with an error, fix the input (the message names the column); do not work around it.
+The headline and the action table are the same under both scopes. `--routes` adds the report's "Scan-only findings" section (usage gaps and routes with no rows, UNMEASURED, no dollars). Other optional flags: `--ttft-budget-ms N` (ask the user for a target if they have one), `--window-days N` (if rows have no timestamps), `--input-excludes-cached` (if the adapter left cache counts out of `input_tokens`), `--label "<text>"`, `--prices <file>`, `--view auto|latency|backoffice|both`, and for `--scope open` `--gate-pass-through FRACTION` (only a share the user measured by replaying their own calls on the gate; never guess one: without it the report shows the gate as a ceiling plus its break-even share). Use `python` (or `python3` where `python` is not Python 3). If it exits with an error, fix the input (the message names the column); do not work around it.
 
 Read the top of `report.md` first:
 
