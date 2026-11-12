@@ -154,7 +154,7 @@ class ReportShapeTests(unittest.TestCase):
         text = calc.render(run(make_rows()))
         self.assertTrue(text.splitlines()[0].startswith("# $"))
         pos = 0
-        for marker in ["Workload view", "opportunities in detail", "Method and limits", "Next step", "## Appendix"]:
+        for marker in ["workload view", "opportunities in detail", "method and limits", "next step", "## appendix"]:
             nxt = text.find(marker, pos)
             self.assertGreater(nxt, -1, marker)
             pos = nxt
@@ -388,7 +388,7 @@ class CacheInUseTests(unittest.TestCase):
 
     def test_section_is_labelled_measured_and_has_no_savings_dollar(self):
         sec = calc.cache_section(self.ctx)
-        self.assertTrue(sec[0].startswith("## Cache in use (MEASURED)"))
+        self.assertTrue(sec[0].startswith("## cache in use (MEASURED)"))
         self.assertIn("carries no savings dollar", "\n".join(sec))
         self.assertNotIn("caching", [r["step"]["key"] for r in self.ctx.rows])    # no prefix_hash, no mechanism
 
@@ -400,11 +400,11 @@ class CacheInUseTests(unittest.TestCase):
         self.assertIn("x cache reads (MEASURED)", lines[0])
         self.assertIn("savings that do not change model output: $0", lines[0])
         # the savings line stays in the body
-        self.assertTrue(any(l.startswith("- **Savings that do not change model output:**") for l in lines))
+        self.assertTrue(any(l.startswith("- Savings that do not change model output") for l in lines))
 
     def test_do_first_points_at_the_cache_route_when_nothing_else_clears_zero(self):
         self.assertAlmostEqual(self.ctx.a_high, 0.0, places=9)    # only an unproven (HYPOTHESIS) idea, batching, is ranked
-        do_first = [l for l in self.text.splitlines() if l.startswith("- **Do first:**")][0]
+        do_first = [l for l in self.text.splitlines() if l.startswith("- First, ")][0]
         self.assertIn("cut cache re-writes on app.py:Writer.run", do_first)
         self.assertIn("MEASURED", do_first)
         self.assertIn("No savings dollar", do_first)
@@ -428,7 +428,7 @@ class CacheInUseTests(unittest.TestCase):
 
     def test_section_says_so_when_there_is_no_cache_data(self):
         text = calc.render(run(make_rows(n_voice=250, n_chat=0, n_small=0)))
-        self.assertIn("## Cache in use (MEASURED): none seen", text)
+        self.assertIn("## cache in use (MEASURED): none seen", text)
 
     def test_prefix_hash_path_is_kept(self):
         rows = make_rows()
@@ -459,10 +459,10 @@ class LeadFactAndCacheChurnTests(unittest.TestCase):
         (f,) = ctx.rewrite_findings
         self.assertEqual(f["rewr"], 12)
         self.assertAlmostEqual(f["usd"], 4 * (3000 * 6.00 + 2 * 1000 * 3.75) / 1e6, places=12)
-        self.assertIn("## Measured findings with no savings dollar", text)
+        self.assertIn("## measured findings with no savings dollar", text)
         self.assertIn("| Cut cache re-writes | app.py:Writer.run | 12 of 16 later calls", text)
-        do_first = [l for l in text.splitlines() if l.startswith("- **Do first:**")][0]
-        self.assertTrue(do_first.startswith("- **Do first:** cut cache re-writes on app.py:Writer.run (MEASURED: 12 re-writes"), do_first)
+        do_first = [l for l in text.splitlines() if l.startswith("- First, ")][0]
+        self.assertTrue(do_first.startswith("- First, cut cache re-writes on app.py:Writer.run (MEASURED: 12 re-writes"), do_first)
         self.assertIn("No savings dollar", do_first)
 
     def test_route_that_does_not_cache_still_gets_the_caching_action_and_no_finding(self):
@@ -470,7 +470,7 @@ class LeadFactAndCacheChurnTests(unittest.TestCase):
         self.assertEqual(ctx.cached_routes, set())
         self.assertEqual(ctx.rewrite_findings, [])
         self.assertIn("caching", [r["step"]["key"] for r in ctx.ranked])
-        self.assertNotIn("Measured findings with no savings dollar", calc.render(ctx))
+        self.assertNotIn("measured findings with no savings dollar", calc.render(ctx))
 
     def test_below_half_of_calls_caching_is_still_offered(self):
         rows = make_rows()
@@ -485,7 +485,7 @@ class LeadFactAndCacheChurnTests(unittest.TestCase):
         ctx = run(cache_rows(with_session=False))
         self.assertIn("app.py:Writer.run", ctx.cached_routes)
         self.assertEqual(ctx.rewrite_findings, [])
-        do_first = [l for l in calc.render(ctx).splitlines() if l.startswith("- **Do first:**")][0]
+        do_first = [l for l in calc.render(ctx).splitlines() if l.startswith("- First, ")][0]
         self.assertIn("app.py:Writer.run writes the cache", do_first)
 
 
@@ -516,7 +516,7 @@ class UsageMissingTests(unittest.TestCase):
 
     def test_report_lists_the_routes_and_the_data_line_counts_them(self):
         text = calc.render(run(self.rows()))
-        self.assertIn("## Calls with no token usage logged", text)
+        self.assertIn("## calls with no token usage logged", text)
         self.assertRegex(text, r"\| state\.py:memo \| 28 \| claude-haiku-4-5 \|")
         self.assertIn("30 flagged usage_missing", text)
 
@@ -561,7 +561,7 @@ class StatelessTests(unittest.TestCase):
     def test_stateless_column_is_documented_in_method_and_read_from_strings(self):
         rows = self.rows("true")
         self.assertTrue(all(c.stateless for c in run(rows).calls))
-        self.assertIn("Stateless routes", calc.render(run(rows)))
+        self.assertIn("Calls flagged stateless are skipped", calc.render(run(rows)))
 
 
 class LoggedCostTests(unittest.TestCase):
@@ -577,7 +577,7 @@ class LoggedCostTests(unittest.TestCase):
         self.assertIn("price at", line)
         self.assertIn("may be cumulative", line)
         self.assertIn("looks cumulative", line)
-        self.assertIn("**Logged cost check:**", calc.render(ctx))
+        self.assertIn("- logged_cost_usd sums to", calc.render(ctx))
 
     def test_per_call_costs_do_not_look_cumulative(self):
         rows = [dict(timestamp=1_700_000_000 + i * 10, route="w.py:run", model="claude-sonnet-4-5", input_tokens=1000,
@@ -606,8 +606,8 @@ class ScanOnlyTests(unittest.TestCase):
 
     def test_section_lists_gaps_and_routes_with_no_rows_without_dollars(self):
         text = self.render(self.DOC)
-        sec = text[text.index("## Scan-only findings"):]
-        sec = sec[:sec.index("## Method")]
+        sec = text[text.index("## scan-only findings"):]
+        sec = sec[:sec.index("## method")]
         self.assertIn("(UNMEASURED, no dollars)", sec)
         self.assertIn("Usage gap: warm-up calls seen 40 times in the logs carry no usage", sec)
         self.assertIn("warm.py:keepalive (live: yes): no priced rows in the export; 40 calls were seen with no token usage logged", sec)
@@ -618,7 +618,7 @@ class ScanOnlyTests(unittest.TestCase):
         self.assertNotIn("$", sec)
 
     def test_no_section_without_routes_file(self):
-        self.assertNotIn("Scan-only", calc.render(run(make_rows(n_voice=250, n_chat=0, n_small=0))))
+        self.assertNotIn("scan-only", calc.render(run(make_rows(n_voice=250, n_chat=0, n_small=0))))
 
     def test_routes_option_on_the_command_line(self):
         with tempfile.TemporaryDirectory() as d:
@@ -629,7 +629,7 @@ class ScanOnlyTests(unittest.TestCase):
                 f.write(json.dumps(dict(model="claude-sonnet-4-5", route="a.py:live_route", input_tokens=10, output_tokens=5)) + "\n")
             calc.main([cp, "--routes", rp, "-o", out])
             with open(out, encoding="utf-8") as f:
-                self.assertIn("## Scan-only findings (UNMEASURED, no dollars)", f.read())
+                self.assertIn("## scan-only findings (UNMEASURED, no dollars)", f.read())
 
 
 class StructuralHashTests(unittest.TestCase):
@@ -773,7 +773,7 @@ class ReviewFixTests(unittest.TestCase):
         text = calc.render(ctx)
         self.assertIn("Skipped (the provider caches automatically", text)
         for l in text.splitlines():
-            if l.startswith("| 1 |") or l.startswith("- **Do first:**"):
+            if l.startswith("| 1 |") or l.startswith("- First, "):
                 self.assertNotIn("app.py:chat", l)
 
     def test_only_implicit_routes_means_no_caching_action_at_all(self):
@@ -815,10 +815,10 @@ class ReviewFixTests(unittest.TestCase):
         self.assertEqual(len(ctx.ranked), 1)
         text = calc.render(ctx)
         self.assertIn("## 1 action is worth", text)
-        self.assertIn("## The 1 opportunity in detail", text)
+        self.assertIn("## 1 opportunity in detail", text)
         text = calc.render(run(simple_rows(40, success="false")))
         self.assertIn("## 2 actions are worth", text)
-        self.assertIn("## The 2 opportunities in detail", text)
+        self.assertIn("## 2 opportunities in detail", text)
         self.assertEqual(calc.pl(1, "opportunity", "opportunities"), "1 opportunity")
 
     def test_floor_line_says_1_route_and_1_call(self):
@@ -893,13 +893,13 @@ class ScopeTests(unittest.TestCase):
         self.open = calc.render(run(self.rows, scope="open"))
 
     def test_default_scope_is_stay_and_header_says_so(self):
-        self.assertIn("**Scope: stay.**", self.stay)
+        self.assertIn("The scope is stay:", self.stay)
         self.assertIn("a smaller model at the same provider", self.stay)
-        self.assertNotIn("Other providers (open scope", self.stay)
+        self.assertNotIn("other providers (open scope", self.stay)
 
     def test_open_scope_header_and_section(self):
-        self.assertIn("**Scope: open.**", self.open)
-        self.assertIn("## Other providers (open scope, HYPOTHESIS)", self.open)
+        self.assertIn("The scope is open:", self.open)
+        self.assertIn("## other providers (open scope, HYPOTHESIS)", self.open)
 
     def test_headline_and_action_table_are_scope_independent(self):
         self.assertEqual(line1(self.stay), line1(self.open))
@@ -916,10 +916,10 @@ class ScopeTests(unittest.TestCase):
             out = os.path.join(d, "r.md")
             calc.main([src, "-o", out])
             with open(out, encoding="utf-8") as f:
-                self.assertIn("**Scope: stay.**", f.read())
+                self.assertIn("The scope is stay:", f.read())
             calc.main([src, "-o", out, "--scope", "open"])
             with open(out, encoding="utf-8") as f:
-                self.assertIn("**Scope: open.**", f.read())
+                self.assertIn("The scope is open:", f.read())
             with self.assertRaises(SystemExit):
                 calc.main([src, "-o", out, "--scope", "elsewhere"])
 
@@ -957,8 +957,8 @@ class OpenCandidateTests(unittest.TestCase):
         _, rec = self.cands(simple_rows(200, model="claude-sonnet-4-5"))
         self.assertTrue(rec["r"]["cands"])
         text = calc.render(run(simple_rows(150, model="claude-sonnet-4-5"), scope="open"))
-        self.assertIn("not enough calls to judge (n=150, under 200)", section(text, "Other providers"))
-        self.assertNotIn("| candidate |", section(text, "Other providers"))
+        self.assertIn("not enough calls to judge (n=150, under 200)", section(text, "other providers"))
+        self.assertNotIn("| candidate |", section(text, "other providers"))
 
     def test_same_class_comes_before_a_cheaper_lower_class(self):
         _, rec = self.cands(simple_rows(200, model="claude-sonnet-4-5"))
@@ -1013,7 +1013,7 @@ class OpenCandidateTests(unittest.TestCase):
 
     def test_section_states_hypothesis_zero_floor_switching_cost_and_eval(self):
         text = calc.render(run(simple_rows(200, model="claude-sonnet-4-5"), scope="open"))
-        sec = section(text, "Other providers")
+        sec = section(text, "other providers")
         self.assertIn("HYPOTHESIS", sec)
         self.assertIn("| if fully switched (monthly, high end) |", sec)
         self.assertNotIn("monthly range", sec)
@@ -1076,7 +1076,7 @@ class DecisionShapedTests(unittest.TestCase):
 
     def test_report_prints_ceiling_and_break_even_without_the_flag(self):
         text = calc.render(run(simple_rows(200, model="gpt-4o", inp=1000, out=2), scope="open"))
-        sec = section(text, "Other providers")
+        sec = section(text, "other providers")
         self.assertIn("net of gate (ceiling: assumes the gate decides every call)", sec)
         self.assertIn("Break-even pass-through share: 98.3%", sec)
         self.assertIn("--gate-pass-through FRACTION", sec)
@@ -1092,7 +1092,7 @@ class DecisionShapedTests(unittest.TestCase):
         cur = rec["spend"]
         self.assertAlmostEqual(gate["gross"], 0.75 * cur, places=9)
         self.assertAlmostEqual(gate["net"], 0.75 * cur - gate["added"], places=9)
-        sec = section(calc.render(ctx), "Other providers")
+        sec = section(calc.render(ctx), "other providers")
         self.assertIn("at your 25.0% pass-through", sec)
         self.assertIn("measured pass-through of 25.0%", sec)
         self.assertNotIn("ceiling", sec)
@@ -1206,7 +1206,7 @@ class ToolSchemaTests(unittest.TestCase):
         self.assertEqual(run(rows).tool_findings, [])
 
     def test_wording_matches_what_is_checked(self):
-        sec = section(calc.render(run(self.rows())), "Unused tool schemas")
+        sec = section(calc.render(run(self.rows())), "unused tool schemas")
         self.assertNotIn("on every call", sec)
         self.assertIn("calls that carry a tool schema and a tool-call count (at least 50 of them)", sec)
 
@@ -1221,11 +1221,11 @@ class ToolSchemaTests(unittest.TestCase):
 
     def test_rows_without_tool_columns_or_schema_are_not_counted(self):
         self.assertFalse(run(simple_rows(50)).tool_cols)
-        self.assertNotIn("Unused tool schemas", calc.render(run(simple_rows(50))))
+        self.assertNotIn("unused tool schemas", calc.render(run(simple_rows(50))))
         self.assertEqual(run(self.rows(schema=0)).tool_findings, [])
 
     def test_section_labels_and_assumption(self):
-        sec = section(calc.render(run(self.rows())), "Unused tool schemas")
+        sec = section(calc.render(run(self.rows())), "unused tool schemas")
         self.assertIn("MEASURED", sec)
         self.assertIn("HYPOTHESIS: drop or defer unused tool definitions", sec)
         self.assertIn("uncached input rate", sec)
@@ -1288,15 +1288,15 @@ class SpiralTests(unittest.TestCase):
         self.assertEqual(run(self.one_call_route(4, failed=1)).spiral_rows[0]["n"], 0)
         # the 4-call rule is only for a median of 1: a median-2 route keeps 6 calls
         self.assertEqual(run(self.rows(spiral_calls=6, failed=2)).spiral_rows[0]["n"], 1)
-        self.assertIn("at least 4 calls", section(calc.render(run(self.one_call_route(4))), "Spirals"))
+        self.assertIn("at least 4 calls", section(calc.render(run(self.one_call_route(4))), "spirals"))
 
     def test_zero_spiral_routes_print_no_row(self):
         ctx = run(self.rows(spiral_calls=5, failed=3))
         self.assertEqual(ctx.spiral_rows[0]["n"], 0)
-        sec = section(calc.render(ctx), "Spirals")
+        sec = section(calc.render(ctx), "spirals")
         self.assertNotIn("| agent |", sec)
         self.assertIn("1 route judged; no task met the spiral rule.", sec)
-        sec = section(calc.render(run(self.rows())), "Spirals")
+        sec = section(calc.render(run(self.rows())), "spirals")
         self.assertIn("| agent |", sec)
 
     def test_tokens_alone_can_make_a_spiral(self):
@@ -1315,7 +1315,7 @@ class SpiralTests(unittest.TestCase):
 
     def test_section_is_measured_and_outside_totals(self):
         text = calc.render(run(self.rows()))
-        sec = section(text, "Spirals")
+        sec = section(text, "spirals")
         self.assertIn("MEASURED", sec)
         self.assertIn("in no total", sec)
         self.assertIn("1 (3.8% of tasks)", sec)
@@ -1365,11 +1365,11 @@ class EvidenceRuleTests(unittest.TestCase):
             del r["session_id"]
             del r["task_id"]                        # task_id is read as the session when there is no session_id column
         ctx = calc.analyze(calc.parse_rows(rows), PRICES)
-        self.assertNotIn("low evidence (", calc.render(ctx).split("## Method")[0].split("Ranked by")[0])
+        self.assertNotIn("low evidence (", calc.render(ctx).split("## method")[0].split("Ranked by")[0])
 
     def test_tool_finding_with_two_sessions_is_marked_low(self):
         rows = ToolSchemaTests().rows(sessions=2)
-        sec = section(calc.render(run(rows)), "Unused tool schemas")
+        sec = section(calc.render(run(rows)), "unused tool schemas")
         self.assertIn("low evidence", sec)
 
     def test_legend_is_in_the_report(self):

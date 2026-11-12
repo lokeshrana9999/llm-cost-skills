@@ -1,6 +1,8 @@
 # Delegation for Codex / ChatGPT
 
-Read this only if you are Codex or a ChatGPT coding agent. Items marked [unsure] depend on your setup; use the closest thing you have.
+This file names who does each step of the three skills when you run as Codex or a ChatGPT coding agent. Items marked [unsure] depend on your setup; use the closest thing you have.
+
+## helper per step
 
 | Step | Who | Why |
 |---|---|---|
@@ -11,7 +13,7 @@ Read this only if you are Codex or a ChatGPT coding agent. Items marked [unsure]
 | llm-diagnose: run `calc.py`, join routes, write "where in code" | your main model | judging, and short |
 | Reading very large logs | a shell command that prints only field names and counts, not values | keeps text out of your context |
 
-## Rules
+## rules
 
 - No model computes numbers. Totals, shares, percentiles, prices and savings come only from `scripts/calc.py`. If you worked a number out yourself, discard it and rerun calc.
 - Run commands with `python`, from the pack folder, in the user's shell [unsure: on Windows use PowerShell syntax; no `&&`].

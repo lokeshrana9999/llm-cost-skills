@@ -1,6 +1,8 @@
 # Delegation for Claude Code
 
-Read this only if you are Claude Code. Use the Agent tool and set `model` on every call; do not let a helper inherit your model.
+This file names the helper for each step of the three skills when you run as Claude Code. Use the Agent tool and set `model` on every call; do not let a helper inherit your model.
+
+## helper per step
 
 | Step | Who | Why |
 |---|---|---|
@@ -11,7 +13,7 @@ Read this only if you are Claude Code. Use the Agent tool and set `model` on eve
 | llm-diagnose: run `calc.py`, join routes, write "where in code" | you | judging, and short |
 | Any step that reads large logs or many files | `haiku` or `sonnet` subagent, summary back | keeps your context small |
 
-## Rules
+## rules for helpers
 
 - No model computes numbers. Totals, shares, percentiles, prices and savings come only from `scripts/calc.py`. A helper that returns a number it worked out itself is wrong; rerun calc.
 - Give each helper only what it needs: the repo path, the schema, the output path under `work/<repo>/`. Never paste log values or prompt text into a brief.

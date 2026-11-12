@@ -20,7 +20,7 @@ prefix_hash, prefix_tokens, prefix_hash_kind (content|structural), usage_missing
 stateless (no trimming or context-growth for the row's session), logged_cost_usd,
 tools_defined, tool_schema_tokens, tool_calls (the unused tool-schema finding).
 --scope: stay (default) keeps every action inside the providers in the export; open adds a separate
-"Other providers" section (HYPOTHESIS, never in the totals). The headline totals are the same for both.
+"other providers" section (HYPOTHESIS, never in the totals). The headline totals are the same for both.
 --gate-pass-through FRACTION: open scope; your measured share of calls a decision-model gate cannot decide.
 --routes: the scan's routes.json; adds the UNMEASURED scan-only findings section.
 input_tokens is assumed to include cached_input_tokens, cache_write_tokens and
@@ -885,16 +885,16 @@ def open_candidates(ctx):
 
 
 def open_section(ctx):
-    L = ["## Other providers (open scope, HYPOTHESIS)", "",
+    L = ["## other providers (open scope, HYPOTHESIS)", "",
          "Models from providers other than the route's own, taken from prices.json by `class` (the same class or one lower) and list price; "
          "no model judges equivalence. `class` is a hand-set price band in prices.json, not a quality claim. Low end is $0 for every "
          "candidate. The figure shown is the high end: the route's window spend re-priced at the candidate's list prices (same tokens, "
          "same cached and uncached split; cached tokens at the input rate for a provider whose cache terms are unverified), x 30/%.1f "
-         "days, if the whole route were switched. **Nothing here is in the action table, the totals or the headline, which are the "
-         "same under --scope stay.** The candidate list is limited to the models priced in prices.json (dated %s): a cheaper model "
+         "days, if the whole route were switched. Nothing here is in the action table, the totals or the headline, which are the "
+         "same under --scope stay. The candidate list is limited to the models priced in prices.json (dated %s): a cheaper model "
          "that is not in the file is not shown. A route needs %d priced calls before candidates are listed." % (ctx.days, ctx.prices.get("_date", "unknown"), OPEN_MIN_CALLS), "",
-         "- **The candidates in each route are alternatives: pick at most one; their figures do not add.**",
-         "- **Token counts differ between providers' tokenizers; re-pricing uses this export's token counts, so a real bill can differ.**", ""]
+         "- The candidates in each route are alternatives: pick at most one; their figures do not add.",
+         "- Token counts differ between providers' tokenizers; re-pricing uses this export's token counts, so a real bill can differ.", ""]
     recs = open_candidates(ctx)
     shown = 0
     for rec in recs:
@@ -926,9 +926,9 @@ def open_section(ctx):
             if c["kind"] == "gate":
                 be = c["breakeven"]
                 if gp is None:
-                    extra.append("Gate ceiling (not an estimate): this assumes the gate decides every call, so no call reaches %s and its whole "
+                    extra.append("The gate figure is a ceiling, not an estimate: it assumes the gate decides every call, so no call reaches %s and its whole "
                                  "%s of window spend is saved; the gate's own %s at %s list prices cost %s; net = %s - %s = %s in the window. "
-                                 "**Break-even pass-through share: %s**: if the gate cannot decide that share of calls or more (they go on to %s "
+                                 "Break-even pass-through share: %s. If the gate cannot decide that share of calls or more (they go on to %s "
                                  "anyway), the net saving is zero. Replay 100-200 logged calls on the gate to measure your share, then rerun with "
                                  "`--gate-pass-through FRACTION`."
                                  % (rec["model"], usd(c["gross"]), pl(rec["n"], "call"), c["model"], usd(c["added"]),
@@ -944,11 +944,11 @@ def open_section(ctx):
         L += table(["candidate", "provider", "class", "route spend at list price", "if fully switched (monthly, high end)", "switching cost"], rows)
         L += [""] + ["- " + e for e in extra]
         if rec["dshape"]:
-            L.append("- **Eval:** replay 100-200 logged calls of this route on the candidate and compare its verdict with the logged verdict by "
+            L.append("- To check, replay 100-200 logged calls of this route on the candidate and compare its verdict with the logged verdict by "
                      "exact match; adopt only at a match rate you set beforehand. The route is decision-shaped (output p50 at most %d tokens on %d+ "
                      "calls, or marked decision_shaped in routes.json)." % (DECISION_MAX_OUT, DECISION_MIN_CALLS))
         else:
-            L.append("- **Eval:** replay 100-200 logged calls of this route, stratified by input size, on the candidate and grade the outputs with "
+            L.append("- To check, replay 100-200 logged calls of this route, stratified by input size, on the candidate and grade the outputs with "
                      "your own pass criteria; the figure falls to $0 for the route if it fails.")
         L.append("")
     if not shown:
@@ -959,7 +959,7 @@ def open_section(ctx):
 def tool_section(ctx):
     if not ctx.tool_cols:
         return []
-    L = ["## Unused tool schemas (MEASURED dollars; the action is a HYPOTHESIS)", ""]
+    L = ["## unused tool schemas (MEASURED dollars, HYPOTHESIS action)", ""]
     thin = (" %s not judged: under %d calls that carry a schema and a tool-call count." % (pl(ctx.tool_thin, "route"), TOOL_MIN_CALLS)
             if ctx.tool_thin else "")
     if not ctx.tool_findings:
@@ -988,7 +988,7 @@ def tool_section(ctx):
 def spiral_section(ctx):
     if not ctx.spiral_rows and not ctx.spiral_thin:
         return []
-    L = ["## Spirals: tasks that loop and fail (MEASURED)", ""]
+    L = ["## spirals: tasks that loop and fail (MEASURED)", ""]
     if not ctx.has["success"]:
         return L + ["The export has no success column, so failed calls cannot be counted and no spiral is judged.", ""]
     L += ["A spiral is a task (calls sharing a task_id on one route) whose calls or tokens exceed %.1fx its route's median task and that has at "
@@ -1406,7 +1406,8 @@ def _latency_block(ctx, route, idxs):
     use_ttft = any(calls[i].ttft is not None for i in idxs)
     metric = (lambda i: calls[i].ttft) if use_ttft else (lambda i: calls[i].lat)
     mname = "TTFT" if use_ttft else "latency"
-    L = ["", "**%s: %s by call position in session** (position = order of the call within its session)" % (route, mname), ""]
+    L = ["", "#### %s: %s by call position in session" % (route, mname), "",
+         "Position is the order of the call within its session.", ""]
     sess = defaultdict(list)
     for i in idxs:
         if calls[i].session and not calls[i].stateless:
@@ -1432,7 +1433,7 @@ def _latency_block(ctx, route, idxs):
             if sel:
                 rows.append([name, "%s to %s input tokens" % (num(min(v[0] for v in vals if lo < v[0] <= hi)), num(max(v[0] for v in vals if lo < v[0] <= hi))),
                              num(len(sel)), p50(sel), p95(sel)])
-        L += ["", "**%s: %s by input size**" % (route, mname), ""]
+        L += ["", "#### %s: %s by input size" % (route, mname), ""]
         L += table(["input size", "range", "calls", "%s p50" % mname, "%s p95" % mname], rows)
         ranked = sorted(vals, key=lambda v: -v[1])
         k = max(1, int(len(ranked) * 0.05))
@@ -1456,8 +1457,9 @@ def _latency_block(ctx, route, idxs):
             if best:
                 hl = " Busiest UTC hours in the tail, as a multiple of each hour's share of all calls: %s." % ", ".join(
                     "%02d:00 at %.1fx (n=%d tail calls)" % (h, (hours_tail[h] / tt) / (hours_all[h] / ta), hours_tail[h]) for h in best)
-        L += ["", "**%s: slowest 5%% by %s** (n=%s calls). Median input %s tokens vs %s for all calls on the route; median output %s vs %s.%s"
-              % (route, mname, num(len(tail)), num(pct([calls[i].inp for i in tail], 50)), num(med_all_in),
+        L += ["", "#### %s: slowest 5%% by %s" % (route, mname), "",
+              "The tail is n=%s calls. Median input %s tokens vs %s for all calls on the route; median output %s vs %s.%s"
+              % (num(len(tail)), num(pct([calls[i].inp for i in tail], 50)), num(med_all_in),
                  num(pct([calls[i].out for i in tail], 50)), num(med_all_out), hl)]
     return L
 
@@ -1553,11 +1555,11 @@ def money_table(ctx):
 def cache_section(ctx):
     t = ctx.cache["tot"]
     if not ctx.cache["rows"]:
-        return ["## Cache in use (MEASURED): none seen", "",
+        return ["## cache in use (MEASURED): none seen", "",
                 "No cache reads or cache writes appear in this export (the cache columns are absent or zero). If the app does cache, "
                 "its logs do not carry the counts.", ""]
     ratio = cache_ratio(t["writes"], t["read"])
-    L = ["## Cache in use (MEASURED): %s of spend is cache writes, %s"
+    L = ["## cache in use (MEASURED): %s of spend is cache writes, %s"
          % (share(t["writes"], ctx.spend, 0),
             {"no reads": "with no cache reads", "no writes": "with no cache writes"}.get(ratio, "%s cache reads" % ratio)), "",
          "Read directly from the cache columns, priced at the rates in prices.json; no prefix_hash needed. This section states what the "
@@ -1578,7 +1580,7 @@ def cache_section(ctx):
         L.append("Top 15 of %d route and model groups by cache-write dollars; the totals row covers all of them." % len(ctx.cache["rows"]))
         L.append("")
     rw = "n/a (no session_id)" if not t["sess"] else "%s of %s later calls, %s" % (num(t["rewr"]), num(t["later"]), usd(t["rewr_usd"]))
-    rows.append(["**Total**", "", num(sum(g["n"] for g in ctx.cache["rows"])), usd(t["read"]), usd(t["w5"]), usd(t["w1"]),
+    rows.append(["Total", "", num(sum(g["n"] for g in ctx.cache["rows"])), usd(t["read"]), usd(t["w5"]), usd(t["w1"]),
                  cache_ratio(t["writes"], t["read"]), share(t["writes"], ctx.spend) + " of all spend", rw])
     L += table(["route", "model", "calls", "cache read $", "5-minute write $", "1-hour write $", "write $ vs read $",
                 "share of spend on writes", "writes after the first call of a session"], rows)
@@ -1595,7 +1597,7 @@ def usage_missing_section(ctx):
         by[u["route"]][0] += 1
         if u["model"]:
             by[u["route"]][1].add(u["model"])
-    L = ["## Calls with no token usage logged: spend is a floor", "",
+    L = ["## calls with no token usage logged: spend is a floor", "",
          "These rows are flagged usage_missing. They are counted here and left out of every spend and savings figure; the calls happened, "
          "their cost is unknown.", ""]
     L += table(["route", "calls", "models seen"],
@@ -1646,7 +1648,7 @@ def scan_only_section(ctx):
                                                                           ", ".join(test_only[:5]) + (" and more" if len(test_only) > 5 else "")))
     if out_of_scope:
         items.append("Out of scope (not LLM calls, kind non_llm): %s." % ", ".join(out_of_scope[:8]))
-    L = ["## Scan-only findings (UNMEASURED, no dollars)", "",
+    L = ["## scan-only findings (UNMEASURED, no dollars)", "",
          "From the scan's routes.json, not from the export. Nothing here is priced or in any dollar figure above.", ""]
     L += ["- " + i for i in items] if items else ["No scan-only findings: every route in routes.json has priced rows and no usage gaps were noted."]
     return L + [""]
@@ -1662,8 +1664,8 @@ def logged_cost_line(ctx):
     for c in vals:
         by[c.route].append(c.logged)
     cum = sorted(r for r, v in by.items() if len(v) >= CUMULATIVE_MIN and _looks_cumulative(v))
-    s = ("- **Logged cost check:** logged_cost_usd sums to %s on %s; the same rows price at %s here (logged / priced = %s). "
-         "Warning: a logged cost may be cumulative per process or session, in which case the logged sum overstates; compare per-call "
+    s = ("- logged_cost_usd sums to %s on %s; the same rows price at %s here (logged / priced = %s). "
+         "A logged cost may be cumulative per process or session, in which case the logged sum overstates; compare per-call "
          "values before trusting it. This report uses the priced figure only."
          % (usd(lsum), pl(len(vals), "row"), usd(psum), ("%.2fx" % (lsum / psum)) if psum > 0 else "n/a"))
     if cum:
@@ -1679,11 +1681,11 @@ def _looks_cumulative(v):
 
 def scope_line(ctx):
     if getattr(ctx, "scope", "stay") == "open":
-        return ("- **Scope: open.** Every action in the table stays with the providers already in the export; in addition a separate section "
+        return ("- The scope is open: every action in the table stays with the providers already in the export, and a separate section "
                 "lists models from other providers as HYPOTHESIS (list price, $0 floor, switching cost, eval named). Those candidates are in no "
                 "total: the headline and the action table are the same under --scope stay.")
-    return ("- **Scope: stay.** Every action stays with the providers already in the export: caching, trimming, output caps, batching, "
-            "failed-call fixes and a smaller model at the same provider. Models from other providers are not considered; run with `--scope open` "
+    return ("- The scope is stay: every action stays with the providers already in the export (caching, trimming, output caps, batching, "
+            "failed-call fixes and a smaller model at the same provider). Models from other providers are not considered; run with `--scope open` "
             "to list them.")
 
 
@@ -1712,7 +1714,7 @@ def render(ctx):
                     "is higher. Add them to prices.json.**"
                     % (num(ctx.unpriced_rows), num(tot), share(ctx.unpriced_rows, tot), ", ".join(sorted(ctx.unpriced))))
     if ctx.usage_missing:
-        note.append("**Spend is a floor: %s on %s %s no token usage logged.**"
+        note.append("Spend is a floor: %s on %s %s no token usage logged."
                     % (pl(len(ctx.usage_missing), "call"), pl(len(ctx.um_by_route), "route"),
                        "has" if len(ctx.usage_missing) == 1 else "have"))
     if getattr(ctx, "label", None):
@@ -1723,14 +1725,14 @@ def render(ctx):
     win = ("%s to %s UTC" % (datetime.fromtimestamp(ctx.start, timezone.utc).strftime("%Y-%m-%d %H:%M"),
                              datetime.fromtimestamp(ctx.end, timezone.utc).strftime("%Y-%m-%d %H:%M"))) if ctx.start else "no timestamps"
     L.append(scope_line(ctx))
-    L.append("- **Window:** %.1f days (%s), %s, %s priced spend; about %s a month if the window is typical (%s x 30 / %.1f days)."
+    L.append("- The window is %.1f days (%s) with %s and %s priced spend: about %s a month if the window is typical (%s x 30 / %.1f days)."
              % (ctx.days, win, pl(n, "call"), usd(ctx.spend), usd(ctx.monthly), usd(ctx.spend), ctx.days))
     if ctx.days < 7 or ctx.window_assumed:
-        L.append("- **Warning:** %s Monthly figures are less reliable."
+        L.append("- Monthly figures are less reliable: %s"
                  % ("no usable timestamps, so the window is assumed to be 30 days." if ctx.window_assumed
                     else "the window is under 7 days, so weekday and weekend patterns are missing."))
-    L.append("- **Savings that do not change model output:** %s a month (%s of monthly spend). **Further, depends on evals:** $0-%s a month "
-             "(up to %s of monthly spend), unproven."
+    L.append("- Savings that do not change model output come to %s a month (%s of monthly spend). A further $0-%s a month "
+             "(up to %s of monthly spend) depends on evals and is unproven."
              % (rng(ctx.a_low, ctx.a_high), mech_pct, usd(ctx.b_high), share(ctx.b_high, ctx.monthly)))
     lg = logged_cost_line(ctx)
     if lg:
@@ -1738,14 +1740,14 @@ def render(ctx):
     if ctx.cache["rows"]:
         t = ctx.cache["tot"]
         ratio = cache_ratio(t["writes"], t["read"])
-        L.append("- **Cache in use (MEASURED):** cache reads %s; cache writes %s (%s 5-minute, %s 1-hour) = %s of spend, %s%s. "
+        L.append("- MEASURED: cache reads cost %s and cache writes cost %s (%s 5-minute, %s 1-hour), %s of spend, %s%s. "
                  "Detail by route and model below."
                  % (usd(t["read"]), usd(t["writes"]), usd(t["w5"]), usd(t["w1"]), share(t["writes"], ctx.spend),
                     {"no reads": "with no cache reads", "no writes": "with no cache writes"}.get(ratio, "%s the cache reads" % ratio),
                     "" if not t["sess"] else "; %s writes came after the first call of a session (%s)" % (num(t["rewr"]), usd(t["rewr_usd"]))))
     tt = [c.ttft for c in calls if c.ttft is not None]
     if tt and len(tt) >= MIN_P95:
-        s = "- **Speed:** TTFT p95 is %s across %s calls with a TTFT" % (ms(pct(tt, 95)), num(len(tt)))
+        s = "- TTFT p95 is %s across %s calls with a TTFT" % (ms(pct(tt, 95)), num(len(tt)))
         if ctx.budget:
             s += "; %s of those calls are over your %s ms budget" % (share(sum(1 for v in tt if v > ctx.budget), len(tt)), num(ctx.budget))
         L.append(s + ".")
@@ -1755,13 +1757,13 @@ def render(ctx):
     if rewrite_first or cache_first:
         # the measured cache cost comes before any unproven idea
         if rewrite_first:
-            s = ("- **Do first:** cut cache re-writes on %s (MEASURED: %s re-writes after the first call of a session, %s in the window). "
+            s = ("- First, cut cache re-writes on %s (MEASURED: %s re-writes after the first call of a session, %s in the window). "
                  "No savings dollar: the saving depends on why the cache is rewritten."
                  % (rw["route"], num(rw["rewr"]), usd(rw["usd"])))
         else:
             g = ctx.cache["rows"][0]
             t = ctx.cache["tot"]
-            s = ("- **Do first:** find out why %s writes the cache (MEASURED: %s of cache writes against %s of reads%s). No savings dollar: "
+            s = ("- First, find out why %s writes the cache (MEASURED: %s of cache writes against %s of reads%s). No savings dollar: "
                  "the export shows the cost but not a mechanism that removes it."
                  % (g["route"], usd(t["writes"]), usd(t["read"]),
                     "" if not t["sess"] else "; %s writes after the first call of a session" % num(t["rewr"])))
@@ -1773,13 +1775,13 @@ def render(ctx):
         L.append(s)
     elif ctx.ranked:
         r = ctx.ranked[0]
-        L.append("- **Do first:** %s on %s: n=%s calls, %s a month after de-duplication, %s."
+        L.append("- First, %s on %s: n=%s calls, %s a month after de-duplication, %s."
                  % (r["step"]["name"].lower(), top_routes(r["acc_show"].by_route), num(r["acc_show"].n),
                     rng(r["lo"] * ctx.k, r["hi"] * ctx.k), r["step"]["label"]))
     else:
-        L.append("- **Do first:** no action clears $0 on this data.")
+        L.append("- No action clears $0 on this data.")
     drop = sum(ctx.dropped.values())
-    L.append("- **Data:** %s read, %s dropped, %s on unpriced models%s%s; prices dated %s. The monthly ranges in the action table are "
+    L.append("- %s read, %s dropped, %s on unpriced models%s%s; prices dated %s. The monthly ranges in the action table are "
              "de-duplicated and add up to the figures above."
              % (pl(ctx.n_read, "row"), num(drop), num(ctx.unpriced_rows),
                 " (" + ", ".join(sorted(ctx.unpriced)) + ")" if ctx.unpriced else "",
@@ -1788,7 +1790,7 @@ def render(ctx):
     L.append("")
 
     # ---- action table
-    L.append("## %s %s worth %s a month after de-duplication%s"
+    L.append("## %s %s worth %s a month%s"
              % (len(ctx.ranked), "action is" if len(ctx.ranked) == 1 else "actions are", rng(ctx.low_total, ctx.high_total),
                 "; first: %s" % ctx.ranked[0]["step"]["name"].lower() if ctx.ranked else ""))
     L.append("")
@@ -1800,11 +1802,11 @@ def render(ctx):
                          "n=%s calls, %s of spend%s" % (num(r["acc_show"].n), share(r["acc_show"].spend, ctx.spend),
                                                         evidence_note(r["acc_show"].sess)),
                          rng(r["lo"] * ctx.k, r["hi"] * ctx.k), s["label"], s["short"], s["effort"]])
-        rows.append(["", "**Total** (sum of the monthly column)", "", "", "**%s**" % rng(ctx.low_total, ctx.high_total), "", "", ""])
+        rows.append(["", "Total (sum of the monthly column)", "", "", rng(ctx.low_total, ctx.high_total), "", "", ""])
         L += table(["rank", "action", "where", "evidence", "monthly range after de-dup", "confidence", "eval needed", "effort"], rows)
     L.append("")
-    L.append("Ranked by the low end of the range, then the high end. Does not change model output: caching, failed-call waste. "
-             "Depends on evals (floor $0): routing, trimming, output caps, batching. \"Low evidence\" marks a finding whose calls carry "
+    L.append("Ranked by the low end of the range, then the high end. Caching and failed-call waste do not change model output. "
+             "Routing, trimming, output caps and batching depend on evals (floor $0). \"Low evidence\" marks a finding whose calls carry "
              "session_id and span fewer than %d sessions: treat it as a lead, not a result." % LOW_EVIDENCE_SESSIONS)
     for name, why in ctx.not_estimated:
         L.append("")
@@ -1814,7 +1816,7 @@ def render(ctx):
         L.append("Checked, nothing to save: %s." % r["step"]["name"].lower())
     L.append("")
     if ctx.rewrite_findings:
-        L += ["## Measured findings with no savings dollar", ""]
+        L += ["## measured findings with no savings dollar", ""]
         rows = []
         for f in ctx.rewrite_findings:
             rows.append(["Cut cache re-writes", f["route"],
@@ -1847,19 +1849,19 @@ def render(ctx):
         if bvals:
             h += " at %s per successful task" % rng(min(bvals), max(bvals))
         heads.append(h)
-    L.append("## Workload view: %s" % ("; ".join(heads) if heads else "no routes"))
+    L.append("## workload view: %s" % ("; ".join(heads) if heads else "no routes"))
     L.append("")
     L.append("Each route gets the view that fits it (%s). Interactive routes have TTFT or streamed calls; the rest are back-office."
              % ("chosen by --view " + ctx.view if ctx.view != "auto" else "auto-detected"))
     if lat_routes:
         rows, blocks = latency_rows(ctx, lat_routes)
-        L += ["", "### Latency view", "", "One call = one turn."
+        L += ["", "### latency view", "", "One call = one turn."
               + ("" if ctx.budget and tt else (" No TTFT budget line: " + ("no --ttft-budget-ms given." if not ctx.budget else "no TTFT column."))), ""]
         L += table(["route", "calls", "TTFT p50", "TTFT p95", "over TTFT budget", "output speed p50", "output length p95", "cost per session", "cost per turn"], rows)
         for b in blocks:
             L += b
     if back_routes:
-        L += ["", "### Back-office view", "",
+        L += ["", "### back-office view", "",
               "Unit = task (calls sharing a task_id; a call with no task id is its own task). Cost per successful task divides all route "
               "spend, failed tasks included, by successful tasks; cost per attempted task divides it by all tasks.", ""]
         L += table(["route", "tasks", "tasks succeeded (proxy)", "calls per task", "cost per attempted task", "cost per successful task",
@@ -1867,20 +1869,19 @@ def render(ctx):
     L.append("")
 
     # ---- cards
-    L.append("## The %s in detail: what we saw, what it is worth, how to check, what would prove it wrong"
-             % pl(len(ctx.ranked), "opportunity", "opportunities"))
+    L.append("## %s in detail" % pl(len(ctx.ranked), "opportunity", "opportunities"))
     for rank, r in enumerate(ctx.ranked, 1):
         s = r["step"]
         a = r["acc_high"]
-        L += ["", "### %d. %s (%s)" % (rank, s["name"], s["label"]), ""]
-        L.append("**What we saw.** %s" % _saw(ctx, r))
-        L += ["", "**What it is worth.** %s a month after the earlier waterfall steps (%s), %s. Standalone it would be %s a month; "
+        L += ["", "### %d. %s (%s)" % (rank, s["name"].lower(), s["label"]), ""]
+        L.append("What we saw. %s" % _saw(ctx, r))
+        L += ["", "What it is worth. %s a month after the earlier waterfall steps (%s), %s. Standalone it would be %s a month; "
               "only the after-earlier range is counted in the totals."
               % (rng(r["lo"] * ctx.k, r["hi"] * ctx.k), ", ".join(x.lower() for x in r["earlier"]) or "none, this step runs first",
                  s["label"], rng(r["alone_low"] * ctx.k, r["alone_high"] * ctx.k)), ""]
         for line in r["acc_low"].lines + a.lines:
             L.append("- " + line)
-        L += ["", "**How to check.** %s" % s["eval"], "", "**What would prove it wrong.** %s" % s["wrong"]]
+        L += ["", "How to check. %s" % s["eval"], "", "What would prove it wrong. %s" % s["wrong"]]
     L.append("")
     if getattr(ctx, "scope", "stay") == "open":
         L += open_section(ctx)
@@ -1911,7 +1912,7 @@ def render(ctx):
                      usd(rsp), share(rsp, ctx.spend) + " of spend"])
     tu, tc, to, tw = (sum(v[1] for v in agg.values()), sum(v[2] for v in agg.values()),
                       sum(v[3] for v in agg.values()), sum(v[4] for v in agg.values()))
-    rows.append(["**Total**", "", num(n), usd(tu), usd(tc), usd(tw), usd(to), usd(tu + tc + to + tw), "100%"])
+    rows.append(["Total", "", num(n), usd(tu), usd(tc), usd(tw), usd(to), usd(tu + tc + to + tw), "100%"])
     L += table(["model", "route", "calls", "uncached input", "cached input", "cache writes", "output", "spend", "share"], rows)
     L.append("")
     if not ctx.has["route"]:
@@ -1924,32 +1925,32 @@ def render(ctx):
     L += scan_only_section(ctx)
 
     # ---- method
-    L.append("## Method and limits: %.1f days of data, projected to 30 days" % ctx.days)
+    L.append("## method and limits: %.1f days of data, projected to 30 days" % ctx.days)
     L.append("")
-    L.append("- **Projection.** Monthly = window spend x 30 / window days (%s x 30 / %.1f). Under 7 days of data the projection is flagged." % (usd(ctx.spend), ctx.days))
-    L.append("- **Prices.** `prices.json` is dated %s with status \"%s\". Verify every price field, cache term and batch discount against the "
+    L.append("- Monthly figures are window spend x 30 / window days (%s x 30 / %.1f). Under 7 days of data the projection is flagged." % (usd(ctx.spend), ctx.days))
+    L.append("- `prices.json` is dated %s with status \"%s\". Verify every price field, cache term and batch discount against the "
              "provider pricing pages before acting on a dollar figure." % (ctx.prices.get("_date", "unknown"), ctx.prices.get("_status", "unknown")))
-    L.append("- **Tokens.** input_tokens includes cached_input_tokens, cache_write_tokens and cache_write_1h_tokens. Spend = uncached input x input rate "
+    L.append("- input_tokens includes cached_input_tokens, cache_write_tokens and cache_write_1h_tokens. Spend = uncached input x input rate "
              "+ cached input x cached rate + cache writes (5-minute at the provider's write multiplier, 1-hour at 2x) x input rate + output x output rate.")
-    L.append("- **Labels.** MEASURED: the size is read directly from the export. MECHANICAL: follows from provider price rules and observed "
-             "timings and does not change model output. HYPOTHESIS: needs proving on your calls with an eval.")
-    L.append("- **Ranges.** Each range comes from named assumptions, not a haircut. Low end: failed-call waste = %d%% of retried failed-call spend "
+    L.append("- Each finding carries one label. MEASURED: the size is read directly from the export. MECHANICAL: follows from provider price "
+             "rules and observed timings and does not change model output. HYPOTHESIS: needs proving on your calls with an eval.")
+    L.append("- Each range comes from named assumptions, not a haircut. Low end: failed-call waste = %d%% of retried failed-call spend "
              "(A1); caching = repeats inside the provider cache time-to-live, net of the write premium, per prefix and never below $0; all other "
              "actions $0. High end: failed-call waste = all failed-call spend; caching = every repeat after the first on each prefix; routing = "
              "short calls (input and output at or under the route medians) at the same provider's next tier down (when several models share "
              "that tier, the one with the lowest input price in prices.json); trimming = input above the "
              "first call of the session at the input rate; caps = output above the p95 of its model and route at the output rate; batching = "
              "non-streamed calls on routes with no TTFT at the provider's batch discount." % int(AVOID_LOW * 100))
-    L.append("- **Waterfall.** Steps run in a fixed order: failed-task waste, routing, trimming, caching, output caps, batching. Each step is "
+    L.append("- Steps run in a fixed order: failed-task waste, routing, trimming, caching, output caps, batching. Each step is "
              "computed on the spend the earlier steps left. The totals sum only the after-earlier figures. The waterfall runs twice, once with "
              "every step at its low end and once at its high end; a row shows the smaller and larger of its two after-earlier figures, so a "
              "later step can show a lower low end than the chains alone suggest. The two buckets use the same waterfall: the caching figure "
              "assumes routing and trimming were adopted, and is worth more if they are not.")
     if ctx.has["success"]:
-        L.append("- **Success.** A task succeeds when its last call succeeded. This is a proxy: a call can succeed technically and still give a wrong answer.")
+        L.append("- A task succeeds when its last call succeeded. This is a proxy: a call can succeed technically and still give a wrong answer.")
     else:
-        L.append("- **Success.** The export has no success column, so no cost per successful task and no failed-call waste figure.")
-    L.append("- **Scope.** `--scope stay` (default) keeps every action inside the providers in the export. `--scope open` adds the \"Other "
+        L.append("- The export has no success column, so no cost per successful task and no failed-call waste figure.")
+    L.append("- `--scope stay` (default) keeps every action inside the providers in the export. `--scope open` adds the \"other "
              "providers\" section: candidates from prices.json by `class`, at list price, always HYPOTHESIS with a $0 low end, outside every "
              "total. `class` is a hand-set price band in prices.json (decision, small, mid, frontier), not a quality claim. A route's spend there "
              "is re-priced token for token with this export's token counts (providers' tokenizers differ, so a real bill can differ); cached "
@@ -1958,37 +1959,37 @@ def render(ctx):
              "shown net of those calls, priced from prices.json. The share of calls the gate cannot decide (they go on to the current model) is "
              "yours to measure: pass it as `--gate-pass-through FRACTION`. Without it the gate figure is the ceiling that assumes the gate "
              "decides every call, printed with the break-even pass-through share (the share at which the net saving is zero)." % OPEN_MIN_CALLS)
-    L.append("- **Evidence.** A finding whose calls carry session_id and span fewer than %d sessions is marked low evidence. Calls with no "
+    L.append("- A finding whose calls carry session_id and span fewer than %d sessions is marked low evidence. Calls with no "
              "session_id leave the session count unknown, which is not marked." % LOW_EVIDENCE_SESSIONS)
     if ctx.tool_cols or ctx.spiral_rows or ctx.spiral_thin:
-        L.append("- **Tool schemas and spirals.** Both are MEASURED spend, outside the waterfall and the totals. Tool-schema dollars use the cached "
+        L.append("- Tool-schema and spiral figures are MEASURED spend, outside the waterfall and the totals. Tool-schema dollars use the cached "
                  "rate when the call's cached tokens cover the schema and the uncached input rate otherwise, and a route needs %d calls that carry "
                  "a schema and a tool-call count; a spiral is a task above %.1fx its route's median calls or tokens with %d or more failed calls "
                  "(routes with under %d tasks are not judged; on a route whose median task is 1 call, a spiral task needs %d or more calls)."
                  % (TOOL_MIN_CALLS, SPIRAL_FACTOR, SPIRAL_MIN_FAILED, SPIRAL_MIN_TASKS, SPIRAL_MIN_CALLS_WHEN_MEDIAN_ONE))
-    L.append("- **Limits.** No p95 is printed for groups under %d calls; no caching dollars without a prefix_hash column; routing only goes to the same "
+    L.append("- No p95 is printed for groups under %d calls; no caching dollars without a prefix_hash column; routing only goes to the same "
              "provider's next tier down (the lowest input price among models sharing that tier); a provider marked cache_mode implicit in "
              "prices.json caches by itself, so no prompt-caching action is recommended for its routes; calls on unpriced models are excluded from every figure." % MIN_P95)
     drops = ", ".join("%s: %s" % (k, num(v)) for k, v in sorted(ctx.dropped.items())) or "none"
-    L.append("- **Data quality.** %s read; %s dropped (%s); %s on unpriced models; %s no usable timestamp."
+    L.append("- %s read; %s dropped (%s); %s on unpriced models; %s no usable timestamp."
              % (pl(ctx.n_read, "row"), num(drop), drops, pl(ctx.unpriced_rows, "row"),
                 "1 priced row has" if ctx.no_ts_rows == 1 else "%s priced rows have" % num(ctx.no_ts_rows)))
     if ctx.usage_missing:
-        L.append("- **Usage missing.** %s on %s flagged usage_missing: counted, not priced, so spend is a floor."
+        L.append("- %s on %s flagged usage_missing: counted, not priced, so spend is a floor."
                  % (pl(len(ctx.usage_missing), "call"), pl(len(ctx.um_by_route), "route")))
     if ctx.has["stateless"]:
-        L.append("- **Stateless routes.** Calls flagged stateless are skipped by the trimming and session-growth steps and by session views: "
+        L.append("- Calls flagged stateless are skipped by the trimming and session-growth steps and by session views: "
                  "each call stands alone, so a later call carries no history to cut.")
     if ctx.struct_hash_rows:
-        L.append("- **Prefix hash.** %s a structural prefix_hash (route, model and process generation), not a hash of the prompt text. "
+        L.append("- %s a structural prefix_hash (route, model and process generation), not a hash of the prompt text. "
                  "The caching figure assumes the prefix is stable across calls with the same hash; billed cache reads are the check."
                  % ("1 row carries" if ctx.struct_hash_rows == 1 else "%s rows carry" % num(ctx.struct_hash_rows)))
     if ctx.ptoks_estimated:
-        L.append("- **Prefix size.** No prefix_tokens for some prefixes; their size is the smallest input seen on that prefix, which can overstate it.")
+        L.append("- No prefix_tokens for some prefixes; their size is the smallest input seen on that prefix, which can overstate it.")
     L.append("")
 
     # ---- next step
-    L.append("## Next step: a pilot on %s in three steps"
+    L.append("## next step: a pilot on %s in three steps"
              % (ctx.cache["rows"][0]["route"] if cache_first
                 else first_route(ctx.ranked[0]["acc_show"].by_route) if ctx.ranked else "your top route"))
     L.append("")
@@ -2067,7 +2068,7 @@ def _saw(ctx, r):
 
 def appendix(ctx):
     calls = ctx.calls
-    L = ["## Appendix", "", "### Token percentiles by route", ""]
+    L = ["## appendix: reference tables and definitions", "", "### token percentiles by route", ""]
     order, sp = routes_by_spend(ctx)
     rows = []
     for r in order:
@@ -2076,11 +2077,11 @@ def appendix(ctx):
         rows.append([r, num(len(idxs)), p50(ins, num), p95(ins, num), p50(outs, num), p95(outs, num)])
     L += table(["route", "calls", "input p50", "input p95", "output p50", "output p95"], rows)
     if ctx.has["task"]:
-        L += ["", "### Five costliest tasks (ids are sha256 hashes)", ""]
+        L += ["", "### five costliest tasks (ids are sha256 hashes)", ""]
         tc = sorted(((sum(cost(ctx.base[i]) for i in g), t, g) for t, g in ctx.tasks.items()), reverse=True)[:5]
         L += table(["task", "route", "calls", "cost", "share of spend"],
                    [[t, calls[g[0]].route, len(g), usd(c), share(c, ctx.spend) + " of spend"] for c, t, g in tc])
-    L += ["", "### Latency per model", ""]
+    L += ["", "### latency per model", ""]
     rows = []
     bym = defaultdict(list)
     for c in calls:
@@ -2091,7 +2092,7 @@ def appendix(ctx):
         rows.append([m, num(len(cs)), p50(la), p95(la), p50(tt), p95(tt)])
     L += table(["model", "calls", "latency p50", "latency p95", "TTFT p50", "TTFT p95"], rows)
     if ctx.cache_groups:
-        L += ["", "### Per-prefix table", ""]
+        L += ["", "### per-prefix table", ""]
         rows = []
         for key, order_ in sorted(ctx.cache_groups.items(), key=lambda kv: -len(kv[1]))[:10]:
             t = provider_terms(ctx.prices, key[1])
@@ -2101,13 +2102,14 @@ def appendix(ctx):
             rows.append([key[0][:12], calls[order_[0]].route, num(len(order_)), num(pct(pt, 50)) if pt else "n/a (estimated)",
                          share(sum(1 for i in order_ if calls[i].cached > 0), len(order_)) + " of its calls", within])
         L += table(["prefix", "route", "calls", "prefix tokens", "calls with cached tokens", "repeats inside cache TTL"], rows)
-    L += ["", "### Candidate-call definitions", "",
-          "- Routing candidate: a call on a model and route group with 200+ calls whose provider has a lower tier, with input and output tokens at or under that group's medians.",
-          "- Trimming candidate: a call that is not the first of its session on its route, in a session with 3+ calls there; excess = its input tokens minus the first call's.",
-          "- Output-cap candidate: a call above the p95 output of its model and route group (200+ calls).",
-          "- Batching candidate: a call that is not streamed (streamed column, else no TTFT) on a provider with a batch discount.",
-          "- Retry: a failed call followed by a later call in the same task on the same model.",
-          "- Cache hit (low end): a call within the provider's cache time-to-live of the previous call on the same prefix_hash and provider, with the prefix at or above the provider's minimum cacheable tokens."]
+    L += ["", "### candidate-call definitions", ""]
+    L += table(["term", "definition"], [
+        ["Routing candidate", "a call on a model and route group with 200+ calls whose provider has a lower tier, with input and output tokens at or under that group's medians"],
+        ["Trimming candidate", "a call that is not the first of its session on its route, in a session with 3+ calls there; excess = its input tokens minus the first call's"],
+        ["Output-cap candidate", "a call above the p95 output of its model and route group (200+ calls)"],
+        ["Batching candidate", "a call that is not streamed (streamed column, else no TTFT) on a provider with a batch discount"],
+        ["Retry", "a failed call followed by a later call in the same task on the same model"],
+        ["Cache hit (low end)", "a call within the provider's cache time-to-live of the previous call on the same prefix_hash and provider, with the prefix at or above the provider's minimum cacheable tokens"]])
     return L
 
 
